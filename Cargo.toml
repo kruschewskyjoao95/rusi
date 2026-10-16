@@ -1,0 +1,37 @@
+[package]
+name = "rusi"
+version = "0.1.0"
+edition = "2024"
+description = "Orquestrador autônomo de agentes de IA em Rust com suporte a MCP, ReAct e terminal interativo"
+authors = ["Joao"]
+
+[dependencies]
+# Runtime Assíncrono
+tokio = { version = "1.43", features = ["full"] }
+async-trait = "0.1"
+async-stream = "0.3"
+futures = "0.3"
+
+# CLI & Argumentos
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# HTTP, SSE & Streaming
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio-stream = "0.1"
+bytes = "1.9"
+
+# Serialização & JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Busca rápida de código e manipulação de arquivos
+ignore = "0.4"
+regex = "1.11"
+
+# Terminal & Interface
+colored = "3.0"
+indicatif = "0.17"
+dirs = "7.0.0"
+dotenvy = "0.15.7"
+thiserror = "2.0.21"
