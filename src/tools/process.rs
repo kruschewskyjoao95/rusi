@@ -53,7 +53,7 @@ pub enum ProcessError {
 
 /// Sends `SIGKILL` to the process group associated with `pid` on Unix systems.
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+pub(crate) fn kill_process_group(pid: u32) {
     if pid > 1 {
         // Send SIGKILL (signal 9) to the process group (-pid)
         unsafe {
@@ -63,7 +63,7 @@ fn kill_process_group(pid: u32) {
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {}
+pub(crate) fn kill_process_group(_pid: u32) {}
 
 /// Merges stdout and stderr into a combined string.
 fn combine_output(stdout: &str, stderr: &str) -> String {

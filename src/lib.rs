@@ -1,4 +1,9 @@
+pub mod chat;
 pub mod cli;
 pub mod config;
-pub mod llm;
+pub mod persistence;
+pub mod provider;
+pub mod rpc;
+pub mod secrets;
+pub mod session;
 pub mod tools;

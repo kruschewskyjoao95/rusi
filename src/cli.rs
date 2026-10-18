@@ -23,7 +23,11 @@ pub struct Cli {
     #[arg(short = 'C', long = "config", value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Modelo LLM a ser utilizado (ex: gemini-2.0-flash, gemini-2.5-pro, claude-3-7-sonnet)
+    /// Provedor de agente a hospedar (ex: claude, codex, antigravity)
+    #[arg(long = "provider", env = "RUSI_PROVIDER")]
+    pub provider: Option<String>,
+
+    /// Modelo a pedir ao provedor (padrão: o do próprio provedor)
     #[arg(short = 'm', long = "model", env = "RUSI_MODEL")]
     pub model: Option<String>,
 
@@ -57,11 +61,17 @@ pub enum Commands {
     /// Gerenciar servidores MCP (Model Context Protocol)
     Mcp(McpArgs),
 
-    /// Listar modelos e status dos provedores de IA suportados
-    Models,
+    /// Listar provedores detectados, versão e estado de login
+    Providers,
 
     /// Gerenciar ou inspecionar as configurações do Rusi
     Config(ConfigArgs),
+
+    /// Listar e gerenciar as sessões (threads) salvas
+    Threads(ThreadsArgs),
+
+    /// Guardar segredos de provedores no keyring do sistema
+    Secrets(SecretsArgs),
 
     /// Exibir informações de instalação e autocomplete
     Install,
@@ -74,6 +84,44 @@ pub enum Commands {
 pub struct McpArgs {
     #[command(subcommand)]
     pub command: McpCommands,
+}
+
+#[derive(Args, Debug)]
+pub struct ThreadsArgs {
+    #[command(subcommand)]
+    pub command: ThreadsCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ThreadsCommands {
+    /// Listar sessões (fixadas primeiro, depois as mais recentes)
+    List {
+        /// Número máximo de sessões
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Fixar uma sessão no topo da lista
+    Pin { id: String },
+    /// Desafixar uma sessão
+    Unpin { id: String },
+    /// Remover uma sessão e seus eventos
+    Delete { id: String },
+}
+
+#[derive(Args, Debug)]
+pub struct SecretsArgs {
+    #[command(subcommand)]
+    pub command: SecretsCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretsCommands {
+    /// Gravar um segredo; o valor é lido da entrada padrão (nunca de argumentos)
+    Set { provider: String, key: String },
+    /// Informar se um segredo existe, sem exibir o valor
+    Status { provider: String, key: String },
+    /// Apagar um segredo
+    Delete { provider: String, key: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -129,8 +177,12 @@ impl Cli {
     /// Mescla os argumentos da linha de comando com a configuração carregada,
     /// garantindo que as flags de linha de comando tenham a maior precedência.
     pub fn merge_with_config(&self, mut config: Config) -> Config {
+        if let Some(ref provider) = self.provider {
+            config.default_provider = provider.clone();
+        }
+
         if let Some(ref model) = self.model {
-            config.default_model = model.clone();
+            config.default_model = Some(model.clone());
         }
 
         if let Some(mode) = self.mode {
@@ -153,7 +205,9 @@ impl Cli {
 pub fn handle_command(cmd: &Commands, config: &mut Config) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         Commands::Mcp(mcp_args) => handle_mcp_command(&mcp_args.command, config)?,
-        Commands::Models => handle_models_command(config),
+        Commands::Providers => handle_providers_command(config),
+        Commands::Threads(args) => handle_threads_command(&args.command)?,
+        Commands::Secrets(args) => handle_secrets_command(&args.command)?,
         Commands::Config(cfg_args) => handle_config_command(cfg_args.command.as_ref(), config)?,
         Commands::Install => handle_install_command(),
         Commands::Update => handle_update_command(),
@@ -241,59 +295,114 @@ fn handle_mcp_command(
     Ok(())
 }
 
-fn handle_models_command(config: &Config) {
-    println!("\n{}", "=== Provedores & Modelos Suportados ===".cyan().bold());
+fn handle_providers_command(config: &Config) {
+    use crate::provider::{AuthState, built_in_drivers, snapshot_all};
 
-    // Provedor Google Gemini
-    let gemini_status = if config.api_keys.gemini_api_key().is_some() {
-        "Configurada ✔".green().bold()
-    } else {
-        "Não configurada (defina GEMINI_API_KEY)".yellow()
-    };
-    println!(
-        "\n{} {}",
-        "Google Gemini".bold().underline(),
-        format!("[API Key: {gemini_status}]").dimmed()
-    );
-    println!("  • gemini-2.5-pro       {}", "(Reasoning avançado, código complexo)".dimmed());
-    println!("  • gemini-2.0-flash     {}", "(Altíssima velocidade, padrão recomendado)".dimmed());
-    println!("  • gemini-2.0-flash-lite{}", "(Econômico, respostas imediatas)".dimmed());
+    println!("\n{}", "=== Provedores ===".cyan().bold());
+    let drivers = built_in_drivers();
+    let snapshots = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(snapshot_all(&drivers))
+    });
 
-    // Provedor Anthropic Claude
-    let claude_status = if config.api_keys.anthropic_api_key().is_some() {
-        "Configurada ✔".green().bold()
-    } else {
-        "Não configurada (defina ANTHROPIC_API_KEY)".yellow()
-    };
-    println!(
-        "\n{} {}",
-        "Anthropic Claude".bold().underline(),
-        format!("[API Key: {claude_status}]").dimmed()
-    );
-    println!("  • claude-3-7-sonnet    {}", "(Hybrid reasoning, engenharia de ponta)".dimmed());
-    println!("  • claude-3-5-haiku     {}", "(Rápido e conciso)".dimmed());
-
-    // Provedor OpenAI
-    let openai_status = if config.api_keys.openai_api_key().is_some() {
-        "Configurada ✔".green().bold()
-    } else {
-        "Não configurada (defina OPENAI_API_KEY)".yellow()
-    };
-    println!(
-        "\n{} {}",
-        "OpenAI".bold().underline(),
-        format!("[API Key: {openai_status}]").dimmed()
-    );
-    println!("  • gpt-4o               {}", "(Multimodal, raciocínio robusto)".dimmed());
-    println!("  • o3-mini              {}", "(Raciocínio lógico e matemática)".dimmed());
-
-    // Modelos Locais (Ollama)
-    println!("\n{}", "Modelos Locais (Ollama / Compatíveis)".bold().underline());
-    println!("  • ollama/qwen2.5-coder {}", "(Open-source líder em código)".dimmed());
-    println!("  • ollama/deepseek-r1   {}", "(Raciocínio local)".dimmed());
-
-    println!("\n{} {}", "Modelo atual ativo:".bold(), config.default_model.cyan().bold());
+    for snap in snapshots {
+        let auth = match &snap.auth {
+            AuthState::Authenticated { account: Some(a) } => format!("logado ({a})").green().bold(),
+            AuthState::Authenticated { account: None } => "logado".green().bold(),
+            AuthState::Unauthenticated => "sem login".yellow().bold(),
+            AuthState::Unknown => "login não verificado".dimmed(),
+            AuthState::Unavailable => "não instalado".red(),
+        };
+        let active = if snap.id == config.default_provider { " ◀ ativo".cyan().bold() } else { "".normal() };
+        println!(
+            "\n{} {}{}",
+            snap.display_name.bold().underline(),
+            format!("[{auth}]").dimmed(),
+            active
+        );
+        if let Some(version) = &snap.version {
+            println!("  versão: {version}");
+        }
+        if let Some(binary) = &snap.binary {
+            println!("  binário: {}", binary.display().to_string().dimmed());
+        }
+        if let Some(message) = &snap.message {
+            println!("  {}", message.yellow());
+        }
+    }
     println!();
+}
+
+/// Abre o banco padrão do Rusi.
+pub fn open_database() -> Result<crate::persistence::Database, Box<dyn std::error::Error>> {
+    let path = crate::persistence::Database::default_path()
+        .ok_or("não foi possível determinar o diretório de dados do usuário")?;
+    Ok(crate::persistence::Database::open(&path)?)
+}
+
+fn handle_threads_command(cmd: &ThreadsCommands) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_database()?;
+    match cmd {
+        ThreadsCommands::List { limit } => {
+            let threads = db.list_threads(*limit)?;
+            if threads.is_empty() {
+                println!("{} Nenhuma sessão salva.", "ℹ".blue().bold());
+            }
+            for t in threads {
+                println!(
+                    "{} {} {} {}",
+                    if t.pinned { "📌" } else { "  " },
+                    t.id.cyan(),
+                    t.provider.bold(),
+                    t.title.as_deref().unwrap_or("(sem título)").dimmed()
+                );
+            }
+        }
+        ThreadsCommands::Pin { id } => {
+            db.set_thread_pinned(id, true)?;
+            println!("{} Sessão fixada.", "✔".green().bold());
+        }
+        ThreadsCommands::Unpin { id } => {
+            db.set_thread_pinned(id, false)?;
+            println!("{} Sessão desafixada.", "✔".green().bold());
+        }
+        ThreadsCommands::Delete { id } => {
+            if db.delete_thread(id)? {
+                println!("{} Sessão removida.", "✔".green().bold());
+            } else {
+                eprintln!("{} Sessão não encontrada: {id}", "✖".red().bold());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_secrets_command(cmd: &SecretsCommands) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::secrets::{KeyringStore, SecretStore};
+    let store = KeyringStore::new();
+    match cmd {
+        SecretsCommands::Set { provider, key } => {
+            let mut value = String::new();
+            std::io::stdin().read_line(&mut value)?;
+            let value = value.trim_end_matches(['\r', '\n']);
+            if value.is_empty() {
+                return Err("valor vazio: envie o segredo pela entrada padrão".into());
+            }
+            store.set(provider, key, value)?;
+            println!("{} Segredo gravado para {provider}/{key}.", "✔".green().bold());
+        }
+        SecretsCommands::Status { provider, key } => {
+            let state = if store.get(provider, key)?.is_some() { "presente".green() } else { "ausente".yellow() };
+            println!("{provider}/{key}: {state}");
+        }
+        SecretsCommands::Delete { provider, key } => {
+            if store.delete(provider, key)? {
+                println!("{} Segredo removido.", "✔".green().bold());
+            } else {
+                println!("{} Nenhum segredo para {provider}/{key}.", "ℹ".blue().bold());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_config_command(
@@ -325,7 +434,8 @@ fn handle_config_command(
             println!("{toml_str}");
         }
         Some(ConfigCommands::Get { key }) => match key.as_str() {
-            "default_model" | "model" => println!("{}", config.default_model),
+            "default_provider" | "provider" => println!("{}", config.default_provider),
+            "default_model" | "model" => println!("{}", config.default_model.as_deref().unwrap_or("")),
             "default_mode" | "mode" => println!("{}", config.default_mode),
             "default_effort" | "effort" => println!("{}", config.default_effort),
             "dangerously_skip_permissions" => println!("{}", config.dangerously_skip_permissions),
@@ -333,7 +443,8 @@ fn handle_config_command(
         },
         Some(ConfigCommands::Set { key, value }) => {
             match key.as_str() {
-                "default_model" | "model" => config.default_model = value.clone(),
+                "default_provider" | "provider" => config.default_provider = value.clone(),
+                "default_model" | "model" => config.default_model = Some(value.clone()),
                 "default_mode" | "mode" => config.default_mode = value.parse()?,
                 "default_effort" | "effort" => config.default_effort = value.parse()?,
                 "dangerously_skip_permissions" => {
@@ -401,7 +512,9 @@ mod tests {
         let args = [
             "rusi",
             "--model",
-            "gemini-2.5-pro",
+            "custom-model",
+            "--provider",
+            "codex",
             "--mode",
             "plan",
             "--effort",
@@ -411,7 +524,8 @@ mod tests {
             "-c",
         ];
         let cli = Cli::try_parse_from(args).expect("Falha ao analisar flags");
-        assert_eq!(cli.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(cli.model.as_deref(), Some("custom-model"));
+        assert_eq!(cli.provider.as_deref(), Some("codex"));
         assert_eq!(cli.mode, Some(AgentMode::Plan));
         assert_eq!(cli.effort, Some(EffortLevel::High));
         assert!(cli.dangerously_skip_permissions);
@@ -451,7 +565,7 @@ mod tests {
         let base_config = Config::default();
 
         let merged = cli.merge_with_config(base_config);
-        assert_eq!(merged.default_model, "custom-model");
+        assert_eq!(merged.default_model.as_deref(), Some("custom-model"));
         assert_eq!(merged.default_mode, AgentMode::Auto);
     }
 }

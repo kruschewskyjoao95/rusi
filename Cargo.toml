@@ -2,23 +2,20 @@
 name = "rusi"
 version = "0.1.0"
 edition = "2024"
-description = "Orquestrador autônomo de agentes de IA em Rust com suporte a MCP, ReAct e terminal interativo"
+description = "Host em Rust para agentes de código que reutiliza as assinaturas do usuário (Claude, ChatGPT, Google, Cursor, Muse)"
 authors = ["Joao"]
 
 [dependencies]
 # Runtime Assíncrono
 tokio = { version = "1.43", features = ["full"] }
 async-trait = "0.1"
-async-stream = "0.3"
 futures = "0.3"
 
 # CLI & Argumentos
 clap = { version = "4.5", features = ["derive", "env"] }
 
-# HTTP, SSE & Streaming
+# HTTP (downloads gerenciados de CLIs)
 reqwest = { version = "0.12", features = ["json", "stream"] }
-tokio-stream = "0.1"
-bytes = "1.9"
 
 # Serialização & JSON
 serde = { version = "1.0", features = ["derive"] }
@@ -35,3 +32,9 @@ indicatif = "0.17"
 dirs = "7.0.0"
 dotenvy = "0.15.7"
 thiserror = "2.0.21"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+uuid = { version = "1.28.0", features = ["v4", "v7"] }
+keyring = "4.2.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

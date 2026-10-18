@@ -108,43 +108,16 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
 }
 
-/// Chaves de API para os provedores de LLM suportados.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ApiKeysConfig {
-    pub gemini_api_key: Option<String>,
-    pub anthropic_api_key: Option<String>,
-    pub openai_api_key: Option<String>,
-}
-
-impl ApiKeysConfig {
-    /// Obtém a chave do Google Gemini com fallback para a variável de ambiente `GEMINI_API_KEY`.
-    pub fn gemini_api_key(&self) -> Option<String> {
-        self.gemini_api_key
-            .clone()
-            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
-    }
-
-    /// Obtém a chave da Anthropic com fallback para a variável de ambiente `ANTHROPIC_API_KEY`.
-    pub fn anthropic_api_key(&self) -> Option<String> {
-        self.anthropic_api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-    }
-
-    /// Obtém a chave da OpenAI com fallback para a variável de ambiente `OPENAI_API_KEY`.
-    pub fn openai_api_key(&self) -> Option<String> {
-        self.openai_api_key
-            .clone()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-    }
-}
-
 /// Configuração global da aplicação Rusi.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    /// Modelo padrão a ser utilizado nas sessões (ex: "gemini-2.0-flash").
-    #[serde(default = "default_model")]
-    pub default_model: String,
+    /// Provedor padrão (ex: "claude", "codex"). O login é o do próprio CLI do provedor.
+    #[serde(default = "default_provider")]
+    pub default_provider: String,
+
+    /// Modelo a pedir ao provedor; `None` usa o padrão dele.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 
     /// Modo padrão de interação e segurança do agente.
     #[serde(default)]
@@ -158,27 +131,23 @@ pub struct Config {
     #[serde(default)]
     pub dangerously_skip_permissions: bool,
 
-    /// Chaves de API configuradas.
-    #[serde(default)]
-    pub api_keys: ApiKeysConfig,
-
     /// Servidores MCP cadastrados.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
-fn default_model() -> String {
-    "gemini-2.0-flash".to_string()
+fn default_provider() -> String {
+    "claude".to_string()
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            default_model: default_model(),
+            default_provider: default_provider(),
+            default_model: None,
             default_mode: AgentMode::default(),
             default_effort: EffortLevel::default(),
             dangerously_skip_permissions: false,
-            api_keys: ApiKeysConfig::default(),
             mcp_servers: HashMap::new(),
         }
     }
@@ -269,7 +238,7 @@ impl Config {
         if let Ok(model) = std::env::var("RUSI_MODEL")
             && !model.trim().is_empty()
         {
-            self.default_model = model;
+            self.default_model = Some(model);
         }
 
         if let Ok(mode_str) = std::env::var("RUSI_MODE")
@@ -290,23 +259,6 @@ impl Config {
             self.dangerously_skip_permissions = true;
         }
 
-        if let Ok(gemini_key) = std::env::var("GEMINI_API_KEY")
-            && !gemini_key.trim().is_empty()
-        {
-            self.api_keys.gemini_api_key = Some(gemini_key);
-        }
-
-        if let Ok(anthropic_key) = std::env::var("ANTHROPIC_API_KEY")
-            && !anthropic_key.trim().is_empty()
-        {
-            self.api_keys.anthropic_api_key = Some(anthropic_key);
-        }
-
-        if let Ok(openai_key) = std::env::var("OPENAI_API_KEY")
-            && !openai_key.trim().is_empty()
-        {
-            self.api_keys.openai_api_key = Some(openai_key);
-        }
     }
 }
 
@@ -317,7 +269,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.default_model, "gemini-2.0-flash");
+        assert_eq!(config.default_provider, "claude");
+        assert_eq!(config.default_model, None);
         assert_eq!(config.default_mode, AgentMode::AcceptEdits);
         assert_eq!(config.default_effort, EffortLevel::Medium);
         assert!(!config.dangerously_skip_permissions);
@@ -327,13 +280,11 @@ mod tests {
     #[test]
     fn test_parse_toml_config() {
         let toml_str = r#"
-            default_model = "gemini-2.5-pro"
+            default_provider = "codex"
+            default_model = "custom-model"
             default_mode = "plan"
             default_effort = "high"
             dangerously_skip_permissions = true
-
-            [api_keys]
-            gemini_api_key = "test-gemini-key"
 
             [mcp_servers.sqlite]
             command = "uvx"
@@ -341,14 +292,11 @@ mod tests {
         "#;
 
         let config: Config = toml::from_str(toml_str).expect("Falha ao deserializar TOML");
-        assert_eq!(config.default_model, "gemini-2.5-pro");
+        assert_eq!(config.default_provider, "codex");
+        assert_eq!(config.default_model.as_deref(), Some("custom-model"));
         assert_eq!(config.default_mode, AgentMode::Plan);
         assert_eq!(config.default_effort, EffortLevel::High);
         assert!(config.dangerously_skip_permissions);
-        assert_eq!(
-            config.api_keys.gemini_api_key.as_deref(),
-            Some("test-gemini-key")
-        );
 
         let sqlite_server = config.mcp_servers.get("sqlite").expect("Servidor sqlite não encontrado");
         assert_eq!(sqlite_server.command, "uvx");

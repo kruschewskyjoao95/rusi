@@ -1,183 +1,83 @@
-# Rusi — Orquestrador de Agentes de IA em Rust 🦀
+# Rusi — Host de Agentes de Código em Rust 🦀
 
-> **Rusi** é um orquestrador de agentes de linha de comando autônomo, seguro e de altíssima performance, construído em Rust.
-> Inspirado na engenharia reversa e arquitetura do **Antigravity CLI** (*Jetski*), adaptado para um design *clean-room* modular, moderno e independente de ecossistemas fechados.
+Rusi **não tem modelo nem loop de agente próprios**. Ele hospeda os agentes que o
+usuário já assina (Claude, ChatGPT/Codex, Google/Antigravity, Cursor, Muse…), reutilizando
+o login de cada um — o mesmo modelo "traga sua assinatura" do T3-Code
+(ver `t3-code-reverse-engineering.md`).
 
----
+## Arquitetura
 
-## 1. Visão Geral da Arquitetura
-
-O Rusi divide o fluxo de orquestração em quatro camadas desacopladas:
-
-```mermaid
-flowchart TD
-    subgraph UI ["Interface CLI & Terminal (clap + reedline)"]
-        CLI[Linha de Comando & Flags]
-        TUI[Renderizador Streaming & Prompts]
-    end
-
-    subgraph Core ["Motor de Raciocínio (Cortex)"]
-        Loop[ReAct Agent Loop]
-        Context[Gerenciador de Contexto & Histórico]
-        Modes[Modos: Auto / Plan / Accept-Edits]
-        Gate[Portão de Permissões & Sandbox]
-    end
-
-    subgraph LLM ["Provedores de Modelo (reqwest + serde)"]
-        Gemini[Google Gemini API]
-        Claude[Anthropic Claude API]
-        OpenAI[OpenAI / Compatíveis]
-        Local[Ollama / Modelos Locais]
-    end
-
-    subgraph Tools ["Execução de Ferramentas"]
-        Builtin[Ferramentas Nativas: FS, Bash, Search]
-        MCPClient[Cliente MCP (JSON-RPC 2.0 stdio)]
-    end
-
-    UI --> Core
-    Core <--> LLM
-    Core --> Gate
-    Gate --> Tools
+```
+Cliente (CLI/TUI; depois web) ──► rusi (Rust, tokio)
+                                   ├─ ProviderDriver por provedor
+                                   │    snapshot (instalado / versão / auth)
+                                   │    sessão (start / send / interrupt / stream)
+                                   │    instalação gerenciada + checksum
+                                   │    sonda de uso e limites
+                                   ├─ Cliente ACP (JSON-RPC stdio) + ponte MCP
+                                   ├─ Cofre de segredos (keyring do SO)
+                                   ├─ Persistência (SQLite + migrations)
+                                   └─ Terminal PTY, git, checkpoints
+                                          │ spawn
+                      claude · codex · agy_acp_server · cursor-agent · muse · …
 ```
 
----
+## Princípios
 
-## 2. Stack Tecnológica Rust Selecionada
+- O login é sempre o do CLI oficial; o Rusi lê estado, nunca expõe tokens.
+- Spawnar o CLI oficial é o caminho padrão. Ler tokens para endpoints de uso é opcional
+  (endpoints não documentados podem quebrar ou violar termos).
+- `Plan` bloqueia ações destrutivas de forma absoluta; aprovações vêm dos pedidos ACP dos agentes.
 
-| Componente | Crate Rust | Motivo da Escolha |
-| :--- | :--- | :--- |
-| **Runtime Assíncrono** | `tokio` (full) | Padrão da indústria para I/O assíncrono, subprocessos e timers. |
-| **CLI & Argumentos** | `clap` (derive) | Interface de linha de comando declarativa com tipagem estática e auto-help. |
-| **Cliente HTTP / SSE** | `reqwest` + `tokio-stream` | Streaming de tokens e respostas do LLM via Server-Sent Events (SSE). |
-| **Serialização** | `serde` + `serde_json` | Manipulação de esquemas de ferramentas, JSON-RPC do MCP e payloads. |
-| **Busca Rápida de Código** | `ignore` + `regex` | Motor idêntico ao do `ripgrep` (criado pelo mesmo autor) embutido nativamente. |
-| **Interface Interativa** | `reedline` + `ratatui` | Edição multilinha no terminal com histórico e renderização rica de Markdown. |
-| **Protocolo MCP** | `tokio::process` + `serde_json` | Comunicação IPC via stdin/stdout com servidores MCP externos. |
+## Fases
 
----
+- [x] **0. Base** — CLI (`clap`), config TOML, trait `ProviderDriver`, `ProviderSnapshot`,
+      detecção de CLIs, auth do Claude via `.credentials.json`, `rusi providers`.
+- [x] **1. Persistência e segredos**
+  - SQLite (`src/persistence`): migrations versionadas por `PRAGMA user_version` (rejeita banco
+    mais novo), WAL, FK, arquivo 0600 em `~/.local/share/rusi/rusi.db` (`RUSI_DB_PATH`).
+    Threads com eventos sequenciais, fixar, renomear, apagar em cascata, `--continue`.
+  - Segredos (`src/secrets`): trait `SecretStore`, keyring do SO (Secret Service) e store em memória.
+    `rusi secrets set|status|delete` (valor só por stdin, nunca exibido).
+  - `rusi threads list|pin|unpin|delete`.
+- [x] **2. Claude** — sessão persistente via `claude --print --input-format stream-json
+      --output-format stream-json` (um processo por conversa, vários turnos).
+  - `src/session`: `AgentSession`/`AgentEvent` neutros de provedor + `run_turn`, que grava o
+    histórico na thread e guarda o id de sessão do provedor (migration 004) para `--resume`.
+  - Streaming de texto, raciocínio, ferramentas e resultados; tokens e custo por turno.
+  - Interrupção (Ctrl-C → `control_request: interrupt`) mantém a sessão aberta; `close` faz EOF e,
+    se preciso, derruba o grupo de processos.
+  - Permissões: `--permission-prompts none` — o que exigiria aprovação é negado e reportado
+    até a fase 6. Modo `plan`/`accept-edits`/`auto` e `--dangerously-skip-permissions` mapeados.
+  - `rusi "prompt"`, `rusi -p "prompt"`, `rusi -c`, e REPL sem prompt.
+- [x] **3. Um driver nativo por provedor, como no T3** (nada de "ACP genérico": o T3 só usa
+      ACP no Antigravity e no Grok; cada um dos outros fala o protocolo do próprio CLI).
+  - Codex: `codex app-server` (JSON-RPC sem campo `jsonrpc`), `thread/start|resume`, `turn/start|interrupt`,
+    aprovações do servidor; login lido por `account/read`.
+  - Muse: `muse serve` (MSP, JSON-RPC 2.0, UUIDv7), `session/start|resume`, `approval/requested` +
+    `approval/decide`.
+  - Pi: `pi --mode rpc` (JSONL), turno termina em `agent_settled`; sem aprovações no Pi, então
+    `plan`/`accept-edits` limitam as ferramentas a leitura. Login por `pi auth check`.
+  - Grok: `grok agent stdio` (ACP), modos por `--permission-mode`/`--always-approve`.
+  - Antigravity: `agy_acp_server` (ACP) com perfil privado (`GEMINI_HOME`), `authenticate`
+    `oauth-personal`, `session/resume`, modos `default`/`yolo`. Falta instalar o binário e logar (fase 4).
+  - OpenCode: `opencode serve` (v2) com senha gerada, REST `/api/session/*` + SSE `/api/event`.
+  - Cursor: `cursor-agent -p --output-format stream-json`, um processo por turno (`--resume`).
+    O T3 usa o `@cursor/sdk`, que não tem equivalente em Rust.
+  - Infra: `src/rpc` (par JSON-RPC em stdio) e `inject` para ordenar o fim de pedidos ACP.
+- [ ] **4. Instalação gerenciada e login OAuth loopback**
+  - Antigravity: `agy-acp-server` de `dl.google.com`, redirect `127.0.0.1`, `state` de uso
+    único (5 min), `iss` = `https://accounts.google.com`.
+  - Codex: release `openai/codex` com SHA-256 fixado, OIDC `auth.openai.com`,
+    callback `/auth/callback`.
+- [ ] **5. Uso e limites** por provedor.
+- [ ] **6. Portão de permissões** — responde aos pedidos de aprovação dos agentes (modos
+      `plan` / `accept-edits` / `auto`).
+- [ ] **7. Terminal PTY, git, checkpoints, review de diffs.**
+- [ ] **8. TUI, depois API para cliente web.**
 
-## 3. Roadmap de Implementação
+## Código herdado
 
-### Fase 1: Fundação & Interface de Linha de Comando (CLI)
-* **Objetivo**: Estruturar o projeto Cargo e criar o CLI com todas as flags e subcomandos fundamentais.
-* **Tarefas**:
-  - [x] Inicializar workspace Rust (`cargo init --bin`).
-  - [x] Definir CLI com `clap`:
-    - Flags: `--mode` (`auto`, `plan`, `accept-edits`), `--model`, `--effort` (`low`, `medium`, `high`), `--dangerously-skip-permissions`, `--print`, `-c / --continue`.
-    - Subcomandos: `mcp` (add, remove, list), `models`, `install`, `update`.
-  - [x] Carregamento de configuração (`~/.config/rusi/config.toml` ou `.env`).
-  - [x] Suporte a chaves de API (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
-
-### Fase 2: Conectores LLM & Streaming de Tokens
-* **Objetivo**: Conectar aos provedores de inteligência com respostas em tempo real.
-* **Tarefas**:
-  - [x] Trait `LlmProvider` abstrata para desacoplar modelos:
-    ```rust
-    #[async_trait]
-    pub trait LlmProvider: Send + Sync {
-        async fn stream_completion(
-            &self,
-            system_instruction: Option<&str>,
-            messages: &[ChatMessage],
-            tools: &[ToolDefinition],
-        ) -> Result<ChunkStream, LlmError>;
-    }
-    ```
-  - [x] Implementar conector da **Google Gemini API** (Gemini 2.0 Flash / Pro) com chamada de ferramentas estruturada (`functionDeclarations`).
-  - [x] Suporte a streaming com Server-Sent Events (SSE) e formatação Markdown instantânea no terminal.
-
-
-### Fase 3: Conjunto de Ferramentas Nativas (*Built-in Tools*)
-* **Objetivo**: Prover ao agente as capacidades essenciais para ler, editar e executar no workspace.
-* **Tarefas**:
-  - [ ] **Sistema de Arquivos**:
-    - `file_read(path, start_line, end_line)`
-    - `file_write(path, content, overwrite)`
-    - `file_edit(path, target_block, replacement_block)`
-  - [ ] **Execução de Comandos**:
-    - `bash_run(command, cwd, timeout_ms)`: Execução assíncrona com captura de stdout/stderr e cancelamento limpo.
-  - [ ] **Busca no Código**:
-    - `code_search(pattern, path)`: Busca regex ultra-rápida respeitando `.gitignore` através da crate `ignore`.
-  - [ ] **Portão de Segurança e Permissões (`Gate`)**:
-    - Interceptar comandos destrutivos ou edições para aprovação do usuário (`[y/N]`), salvo se `--dangerously-skip-permissions` estiver ativo.
-
-### Fase 4: O Motor do Agente (*Cortex Loop*)
-* **Objetivo**: Implementar o loop autônomo ReAct (Reason + Act).
-* **Tarefas**:
-  - [ ] Estrutura do loop:
-    1. Monta contexto atual (System Prompt + Histórico + Definição das Ferramentas).
-    2. Envia para o LLM e aguarda decisão (Texto direto vs. `ToolCall`).
-    3. Se houver `ToolCall`:
-       - Valida permissões.
-       - Executa a ferramenta e formata o resultado.
-       - Adiciona resultado ao histórico do diálogo.
-       - Realimenta o modelo recursivamente até atingir o objetivo ou o limite de turnos.
-  - [ ] Gestão de modos:
-    - `Plan`: Impede a execução de ferramentas de escrita; apenas planeja.
-    - `Accept-Edits`: Solicita confirmação manual para cada ação.
-    - `Auto`: Executa autonomamente até terminar a tarefa.
-  - [ ] Compactação e janela de contexto para evitar estouro de tokens.
-
-### Fase 5: Cliente MCP (Model Context Protocol)
-* **Objetivo**: Permitir que o Rusi utilize qualquer ferramenta externa existente no ecossistema MCP.
-* **Tarefas**:
-  - [ ] Implementar transporte `stdio` assíncrono em Rust sobre JSON-RPC 2.0.
-  - [ ] Descoberta de ferramentas dinâmicas (`tools/list`).
-  - [ ] Tradução bidirecional entre definições MCP e as chamadas do LLM.
-  - [ ] Gerenciamento de servidores no arquivo de configuração do Rusi:
-    ```toml
-    [mcp_servers.sqlite]
-    command = "uvx"
-    args = ["mcp-server-sqlite", "--db-path", "./test.db"]
-    ```
-
-### Fase 6: Experiência de Terminal & Comandos Slash
-* **Objetivo**: Interface polida para desenvolvedores.
-* **Tarefas**:
-  - [ ] Suporte a comandos rápidos (Slash Commands): `/plan`, `/compact`, `/help`, `/clear`.
-  - [ ] Histórico persistente de comandos no terminal (`~/.rusi_history`).
-  - [ ] Renderização de diffs coloridos antes de aplicar alterações em arquivos.
-
----
-
-## 4. Estrutura Proposta para o Projeto em Rust
-
-```text
-/home/joao/Projects/rusi/
-├── Cargo.toml
-├── README.md
-├── ROADMAP.md
-└── src/
-    ├── main.rs                   # Ponto de entrada CLI e parsing de argumentos
-    ├── config.rs                 # Gerenciamento de opções e variáveis de ambiente
-    ├── cortex/                   # O motor de orquestração e loop ReAct
-    │   ├── mod.rs
-    │   ├── loop_engine.rs        # Ciclo de vida das mensagens e turnos
-    │   ├── context.rs            # Gerenciamento de tokens e janela de contexto
-    │   └── permissions.rs        # Gatekeeper de confirmações e segurança
-    ├── llm/                      # Abstração e provedores de IA
-    │   ├── mod.rs
-    │   ├── provider.rs           # Trait LlmProvider
-    │   ├── gemini.rs             # Implementação Google Gemini
-    │   └── stream.rs             # Parser de SSE e chunks
-    ├── tools/                    # Ferramentas nativas do sistema
-    │   ├── mod.rs
-    │   ├── fs.rs                 # Leitura, escrita e edição de arquivos
-    │   ├── process.rs            # Execução de comandos bash
-    │   └── search.rs             # Busca rápida com a crate ignore
-    ├── mcp/                      # Cliente Model Context Protocol
-    │   ├── mod.rs
-    │   ├── client.rs             # Conexão stdio e protocolo JSON-RPC
-    │   └── registry.rs           # Gerenciamento de múltiplos servidores MCP
-    └── ui/                       # Interface de usuário e terminal
-        ├── mod.rs
-        ├── terminal.rs           # Leitor de prompts interactivos
-        └── renderer.rs           # Exibição rica e diffs
-```
-
----
-
-## 5. Próximo Passo
-
-Para começar a implementação da **Fase 1**, podemos inicializar o pacote `Cargo.toml` com as dependências essenciais e montar o esqueleto do projeto.
+`src/tools/{fs,process}.rs` (leitura/escrita/edição e `bash_run` com kill de grupo) deixam de
+ser ferramentas de agente; servem de base para terminal e checkpoints. O conector Gemini e o
+design de loop ReAct foram removidos (histórico no git).
