@@ -24,7 +24,14 @@
       <nav id="sessions" aria-label="Tarefas"></nav>
     </aside>
     <main id="main">
-      <div id="context-bar"></div>
+      <div id="context-bar" class="row">
+        <span id="context-text"></span>
+        <span class="spacer"></span>
+        <form id="worktree-form" class="row" hidden>
+          <input id="branch" placeholder="nova branch" aria-label="Branch do worktree" />
+          <button type="submit" title="Isola esta tarefa num worktree Git">Worktree</button>
+        </form>
+      </div>
       <section id="thread" aria-live="polite"></section>
       <div id="approvals"></div>
       <form id="composer">
@@ -36,6 +43,12 @@
             <option value="plan">Plano (só leitura)</option>
             <option value="full">Completo (sem permissões)</option>
           </select>
+          <select id="effort" aria-label="Esforço">
+            <option value="low">Esforço baixo</option>
+            <option value="medium" selected>Esforço médio</option>
+            <option value="high">Esforço alto</option>
+          </select>
+          <input id="model" placeholder="modelo (padrão)" aria-label="Modelo" />
           <span class="spacer"></span>
           <button type="button" id="stop" hidden>Parar</button>
           <button type="submit" id="send">Enviar</button>

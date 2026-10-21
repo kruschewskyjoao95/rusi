@@ -13,8 +13,10 @@ export interface Api {
   listSessions(): Promise<Thread[]>;
   createSession(provider: string, cwd: string | null): Promise<Thread>;
   deleteSession(threadId: string): Promise<void>;
-  getMessages(threadId: string): Promise<ThreadEvent[]>;
-  sendMessage(threadId: string, prompt: string, mode: string): Promise<void>;
+  /** Até 300 eventos; com `before`, os anteriores a esse `seq`. */
+  getMessages(threadId: string, before?: number): Promise<ThreadEvent[]>;
+  sendMessage(threadId: string, prompt: string, mode: string, model: string, effort: string): Promise<void>;
+  createWorktree(threadId: string, branch: string): Promise<string>;
   stopSession(threadId: string): Promise<void>;
   respondApproval(threadId: string, id: string, approved: boolean): Promise<void>;
   pickFolder(): Promise<string | null>;
@@ -30,8 +32,9 @@ const real: Api = {
   listSessions: () => invoke("list_sessions"),
   createSession: (provider, cwd) => invoke("create_session", { provider, cwd, title: null }),
   deleteSession: (threadId) => invoke("delete_session", { threadId }),
-  getMessages: (threadId) => invoke("get_messages", { threadId }),
-  sendMessage: (threadId, prompt, mode) => invoke("send_message", { threadId, prompt, mode }),
+  getMessages: (threadId, before) => invoke("get_messages", { threadId, before: before ?? null }),
+  sendMessage: (threadId, prompt, mode, model, effort) => invoke("send_message", { threadId, prompt, mode, model, effort }),
+  createWorktree: (threadId, branch) => invoke("create_worktree", { threadId, branch }),
   stopSession: (threadId) => invoke("stop_session", { threadId }),
   respondApproval: (threadId, id, approved) => invoke("respond_approval", { threadId, id, approved }),
   pickFolder: async () => (await open({ directory: true, title: "Pasta do projeto" })) ?? null,
@@ -70,7 +73,15 @@ function createMock(): Api {
       threads.splice(threads.findIndex((t) => t.id === id), 1);
       listeners.sessions.forEach((f) => f());
     },
-    getMessages: async (id) => [...(events.get(id) ?? [])],
+    getMessages: async (id, before) => (events.get(id) ?? []).filter((e) => before === undefined || e.seq < before).slice(-300),
+    createWorktree: async (id, branch) => {
+      const t = threads.find((x) => x.id === id)!;
+      t.branch = branch;
+      t.worktree_path = `${t.cwd}-worktrees/${branch}`;
+      t.cwd = t.worktree_path;
+      listeners.sessions.forEach((f) => f());
+      return t.worktree_path;
+    },
     sendMessage: async (id, prompt) => {
       push(id, "user", { text: prompt });
       void (async () => {

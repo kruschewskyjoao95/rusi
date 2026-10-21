@@ -118,14 +118,15 @@ fn delete_session(app: AppHandle, state: Shared<'_>, thread_id: String) -> CmdRe
 }
 
 #[tauri::command(async)]
-fn get_messages(state: Shared<'_>, thread_id: String) -> CmdResult<Vec<ThreadEvent>> {
-    state.db().recent_thread_events(&thread_id, MESSAGE_LIMIT).map_err(err)
+fn get_messages(state: Shared<'_>, thread_id: String, before: Option<i64>) -> CmdResult<Vec<ThreadEvent>> {
+    state.db().recent_thread_events(&thread_id, MESSAGE_LIMIT, before).map_err(err)
 }
 
 /// Inicia um turno em segundo plano; o progresso chega pelos eventos `agent-event` e `turn-finished`.
 /// `mode`: `accept-edits` (padrão), `auto`, `plan` ou `full` (sem permissões).
+/// `model` (vazio = o da sessão) e `effort` (`low`/`medium`/`high`) valem só para este turno.
 #[tauri::command(async)]
-fn send_message(app: AppHandle, state: Shared<'_>, thread_id: String, prompt: String, mode: Option<String>) -> CmdResult<()> {
+fn send_message(app: AppHandle, state: Shared<'_>, thread_id: String, prompt: String, mode: Option<String>, model: Option<String>, effort: Option<String>) -> CmdResult<()> {
     let state = Arc::clone(&state);
     let thread = state.db().get_thread(&thread_id).map_err(err)?;
     let driver = driver_by_id(&thread.provider).ok_or_else(|| format!("provedor desconhecido: {}", thread.provider))?;
@@ -134,6 +135,12 @@ fn send_message(app: AppHandle, state: Shared<'_>, thread_id: String, prompt: St
         Some("full") => (AgentMode::Auto, true),
         Some(m) => (m.parse::<AgentMode>().map_err(err)?, false),
     };
+
+    let effort = match effort.as_deref() {
+        None | Some("") => Default::default(),
+        Some(e) => e.parse().map_err(err)?,
+    };
+    let model = model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).or(thread.model);
 
     if thread.title.is_none() {
         let title = rusi::chat::title_from(&prompt);
@@ -155,7 +162,8 @@ fn send_message(app: AppHandle, state: Shared<'_>, thread_id: String, prompt: St
     let cwd = thread.cwd.map(PathBuf::from);
     let config = SessionConfig {
         cwd: cwd.clone(),
-        model: thread.model,
+        model,
+        effort,
         mode: agent_mode,
         dangerously_skip_permissions: skip,
         resume: thread.provider_session_id,

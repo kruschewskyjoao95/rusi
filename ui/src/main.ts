@@ -10,6 +10,8 @@ const state = {
   sessions: [] as Thread[],
   current: null as Thread | null,
   events: [] as ThreadEvent[],
+  /** A última busca encheu a página: pode haver eventos mais antigos no banco. */
+  hasMore: false,
   /** Turnos em andamento, por sessão; guarda o que chegou em streaming. */
   live: new Map<string, { text: string; steps: string[]; approvals: ApprovalRequest[] }>(),
 };
@@ -33,6 +35,7 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 
 // ---------- tarefas ----------
 
+const PAGE = 300;
 const DAY = 24 * 60 * 60 * 1000;
 
 function renderSessions() {
@@ -64,9 +67,28 @@ async function refreshSessions() {
   renderContext();
 }
 
+/** Traz os eventos mais recentes e mantém os antigos já carregados. */
+async function reload(threadId: string) {
+  const latest = await api.getMessages(threadId);
+  const older = latest.length ? state.events.filter((e) => e.seq > 0 && e.seq < latest[0].seq) : [];
+  state.events = [...older, ...latest];
+  if (!older.length) state.hasMore = latest.length >= PAGE;
+}
+
+async function loadOlder() {
+  const t = state.current;
+  const first = state.events.find((e) => e.seq > 0);
+  if (!t || !first) return;
+  const page = await api.getMessages(t.id, first.seq);
+  state.events = [...page, ...state.events];
+  state.hasMore = page.length >= PAGE;
+  renderThread();
+}
+
 async function select(thread: Thread) {
   state.current = thread;
-  state.events = await api.getMessages(thread.id);
+  state.events = [];
+  await reload(thread.id);
   renderAll();
   void guard(refreshGit)();
 }
@@ -75,7 +97,8 @@ async function select(thread: Thread) {
 
 function renderContext() {
   const t = state.current;
-  $("context-bar").textContent = t ? `${t.cwd ?? "sem pasta"} · ${t.worktree_path ? "Worktree" : "Local"}${t.branch ? " · " + t.branch : ""} · ${t.provider}` : "Selecione ou crie uma tarefa";
+  $("context-text").textContent = t ? `${t.cwd ?? "sem pasta"} · ${t.worktree_path ? "Worktree" : "Local"}${t.branch ? " · " + t.branch : ""} · ${t.provider}` : "Selecione ou crie uma tarefa";
+  $("worktree-form").hidden = !t || !t.cwd || !!t.worktree_path;
 }
 
 /** Agrupa ferramentas e aprovações de cada turno num bloco recolhido; texto, erros e mudanças ficam fora. */
@@ -83,6 +106,12 @@ function renderThread() {
   const box = $("thread");
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
   box.replaceChildren();
+  if (state.hasMore) {
+    const more = el("button", undefined, "Carregar mensagens anteriores") as HTMLButtonElement;
+    more.type = "button";
+    more.onclick = guard(loadOlder);
+    box.append(more);
+  }
   let steps: HTMLElement[] = [];
   const flush = () => {
     if (!steps.length) return;
@@ -113,19 +142,45 @@ function renderThread() {
       box.append(changesBlock(p.files));
     }
   }
-  const live = state.current && state.live.get(state.current.id);
-  if (live) {
-    for (const s of live.steps) steps.push(el("div", "step", s));
-    flush();
-    if (live.text) {
-      const m = el("div", "msg");
-      m.innerHTML = renderMarkdown(live.text);
-      box.append(m);
-    }
-  } else {
-    flush();
-  }
+  flush();
+  liveBox = el("div", "live");
+  box.append(liveBox);
+  renderLive();
   if (stick) box.scrollTop = box.scrollHeight;
+}
+
+let liveBox: HTMLElement | null = null;
+let liveQueued = false;
+
+/** Só a parte em streaming; agrupada por quadro para não refazer o Markdown a cada trecho. */
+function scheduleLive() {
+  if (liveQueued) return;
+  liveQueued = true;
+  requestAnimationFrame(() => {
+    liveQueued = false;
+    const box = $("thread");
+    const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    renderLive();
+    if (stick) box.scrollTop = box.scrollHeight;
+  });
+}
+
+function renderLive() {
+  if (!liveBox) return;
+  liveBox.replaceChildren();
+  const live = state.current && state.live.get(state.current.id);
+  if (!live) return;
+  if (live.steps.length) {
+    const d = el("details", "work") as HTMLDetailsElement;
+    d.open = true;
+    d.append(el("summary", undefined, `Trabalhando… ${live.steps.length} ${live.steps.length === 1 ? "ação" : "ações"}`), ...live.steps.map((s) => el("div", "step", s)));
+    liveBox.append(d);
+  }
+  if (live.text) {
+    const m = el("div", "msg");
+    m.innerHTML = renderMarkdown(live.text);
+    liveBox.append(m);
+  }
 }
 
 function changesBlock(files: { path: string; added: number | null; deleted: number | null }[]): HTMLElement {
@@ -209,7 +264,7 @@ function onAgentEvent({ threadId, event }: AgentEventPayload) {
     case "approval_requested": live.approvals.push(event.data); break;
   }
   if (threadId === state.current?.id) {
-    renderThread();
+    scheduleLive();
     renderApprovals();
     renderComposer();
   }
@@ -219,7 +274,7 @@ async function onTurnFinished(threadId: string, isError: boolean, text: string) 
   state.live.delete(threadId);
   if (isError && text) toast(text);
   if (threadId === state.current?.id) {
-    state.events = await api.getMessages(threadId);
+    await reload(threadId);
     renderAll();
     await refreshGit();
   } else renderSessions();
@@ -236,10 +291,10 @@ async function send() {
   ($("prompt") as HTMLTextAreaElement).value = "";
   renderAll();
   try {
-    await api.sendMessage(t.id, prompt, ($("mode") as HTMLSelectElement).value);
+    await api.sendMessage(t.id, prompt, ($("mode") as HTMLSelectElement).value, ($("model") as HTMLInputElement).value, ($("effort") as HTMLSelectElement).value);
   } catch (e) {
     state.live.delete(t.id);
-    state.events = await api.getMessages(t.id);
+    await reload(t.id);
     renderAll();
     throw e;
   }
@@ -277,6 +332,15 @@ async function init() {
   $("pick-cwd").onclick = guard(async () => {
     const dir = await api.pickFolder();
     if (dir) ($("new-cwd") as HTMLInputElement).value = dir;
+  });
+  $("worktree-form").onsubmit = guard(async (ev) => {
+    ev.preventDefault();
+    const branch = ($("branch") as HTMLInputElement).value.trim();
+    if (!state.current || !branch) return;
+    await api.createWorktree(state.current.id, branch);
+    ($("branch") as HTMLInputElement).value = "";
+    await refreshSessions();
+    void guard(refreshGit)();
   });
   $("composer").onsubmit = guard(async (ev) => {
     ev.preventDefault();

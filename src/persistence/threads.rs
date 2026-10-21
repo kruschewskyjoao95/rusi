@@ -186,13 +186,13 @@ impl Database {
         )
     }
 
-    /// Os últimos `limit` eventos de uma thread, em ordem.
-    pub fn recent_thread_events(&self, thread_id: &str, limit: u32) -> Result<Vec<ThreadEvent>, DbError> {
+    /// Os últimos `limit` eventos de uma thread, em ordem; com `before`, só os de `seq` menor que ele.
+    pub fn recent_thread_events(&self, thread_id: &str, limit: u32, before: Option<i64>) -> Result<Vec<ThreadEvent>, DbError> {
         self.query_events(
             "SELECT seq, kind, payload, created_at FROM
-               (SELECT seq, kind, payload, created_at FROM thread_events WHERE thread_id = ?1 ORDER BY seq DESC LIMIT ?2)
+               (SELECT seq, kind, payload, created_at FROM thread_events WHERE thread_id = ?1 AND seq < ?3 ORDER BY seq DESC LIMIT ?2)
              ORDER BY seq",
-            params![thread_id, limit],
+            params![thread_id, limit, before.unwrap_or(i64::MAX)],
         )
     }
 
@@ -248,8 +248,10 @@ mod tests {
         assert_eq!(db.thread_events(&t.id, 1).unwrap(), vec![e2.clone()]);
 
         let e3 = db.append_event(&t.id, "user", &json!({"text": "de novo"})).unwrap();
-        assert_eq!(db.recent_thread_events(&t.id, 2).unwrap(), vec![e2, e3]);
-        assert_eq!(db.recent_thread_events(&t.id, 99).unwrap().len(), 3);
+        assert_eq!(db.recent_thread_events(&t.id, 2, None).unwrap(), vec![e2.clone(), e3]);
+        assert_eq!(db.recent_thread_events(&t.id, 99, None).unwrap().len(), 3);
+        // Página anterior: o que veio antes de `e2`.
+        assert_eq!(db.recent_thread_events(&t.id, 5, Some(e2.seq)).unwrap().len(), 1);
     }
 
     #[test]
