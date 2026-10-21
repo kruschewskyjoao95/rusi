@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{AgentMode, EffortLevel};
 use crate::rpc::{Incoming, RpcError, RpcPeer};
-use crate::session::{AgentEvent, AgentSession, SessionConfig, SessionError, TokenUsage};
+use crate::session::{AgentEvent, AgentSession, ApprovalRequest, PendingApprovals, SessionConfig, SessionError, TokenUsage};
 
 fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
@@ -25,6 +25,8 @@ pub(super) struct MusePolicy {
     pub permission_profile: &'static str,
     pub disable_sandbox: bool,
     pub auto_accept: bool,
+    /// Pedidos viram `ApprovalRequested` e quem decide é o usuário.
+    pub ask: bool,
 }
 
 pub(super) fn policy_for(config: &SessionConfig) -> MusePolicy {
@@ -34,6 +36,7 @@ pub(super) fn policy_for(config: &SessionConfig) -> MusePolicy {
             permission_profile: ":unrestricted",
             disable_sandbox: true,
             auto_accept: true,
+            ask: false,
         };
     }
     match config.mode {
@@ -42,20 +45,33 @@ pub(super) fn policy_for(config: &SessionConfig) -> MusePolicy {
             permission_profile: ":ask-me",
             disable_sandbox: false,
             auto_accept: false,
+            ask: false,
         },
         AgentMode::AcceptEdits => MusePolicy {
             approval_mode: "promptUnmatched",
             permission_profile: ":ask-me",
             disable_sandbox: false,
             auto_accept: false,
+            ask: true,
         },
         AgentMode::Auto => MusePolicy {
             approval_mode: "allowAll",
             permission_profile: ":ask-me",
             disable_sandbox: false,
             auto_accept: true,
+            ask: false,
         },
     }
+}
+
+fn decide_params(session_id: &str, params: &Value, choice_id: String) -> Value {
+    json!({
+        "commandId": new_id(),
+        "sessionId": session_id,
+        "approvalId": params["approvalId"],
+        "requirementId": params["currentRequirementId"],
+        "choiceId": choice_id,
+    })
 }
 
 fn effort_name(effort: EffortLevel) -> &'static str {
@@ -194,6 +210,7 @@ pub struct MuseSession {
     turn_id: Arc<Mutex<Option<String>>>,
     events: mpsc::UnboundedReceiver<AgentEvent>,
     effort: EffortLevel,
+    approvals: PendingApprovals,
 }
 
 fn rpc_to_session(err: RpcError) -> SessionError {
@@ -284,30 +301,40 @@ impl MuseSession {
         let turn_id: Arc<Mutex<Option<String>>> = Arc::default();
         let task_peer = peer.clone();
         let task_session = session_id.clone();
-        let auto_accept = policy.auto_accept;
+        let (auto_accept, ask) = (policy.auto_accept, policy.ask);
+        let approvals = PendingApprovals::default();
+        let task_approvals = approvals.clone();
         tokio::spawn(async move {
             let mut translator = Translator::default();
             while let Some(message) = incoming.recv().await {
                 match message {
                     Incoming::Notification { method, params } => {
                         match method.as_str() {
+                            "approval/requested" if ask => {
+                                // Sem `approvalId` não há como responder; o Muse segue sem resposta.
+                                if let Some(key) = params["approvalId"].as_str().map(str::to_string) {
+                                    let (peer, session, reply_params) = (task_peer.clone(), task_session.clone(), params.clone());
+                                    task_approvals.register(key.clone(), move |approved| async move {
+                                        if let Some((choice_id, _)) = pick_choice(&reply_params, approved) {
+                                            let _ = peer.request("approval/decide", decide_params(&session, &reply_params, choice_id)).await;
+                                        }
+                                    });
+                                    let request = ApprovalRequest {
+                                        id: key,
+                                        tool: params["toolName"].as_str().unwrap_or("tool").to_string(),
+                                        input: params.clone(),
+                                    };
+                                    if tx.send(AgentEvent::ApprovalRequested(request)).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
                             "approval/requested" => {
                                 if let Some((choice_id, denied)) = pick_choice(&params, auto_accept) {
                                     if let Some(tool) = denied {
                                         translator.note_denied(&tool);
                                     }
-                                    let _ = task_peer
-                                        .request(
-                                            "approval/decide",
-                                            json!({
-                                                "commandId": new_id(),
-                                                "sessionId": task_session,
-                                                "approvalId": params["approvalId"],
-                                                "requirementId": params["currentRequirementId"],
-                                                "choiceId": choice_id,
-                                            }),
-                                        )
-                                        .await;
+                                    let _ = task_peer.request("approval/decide", decide_params(&task_session, &params, choice_id)).await;
                                 }
                             }
                             "userInput/requested" => {
@@ -348,7 +375,7 @@ impl MuseSession {
             }
         });
 
-        Ok(Self { peer, session_id, cwd, turn_id, events, effort: config.effort })
+        Ok(Self { peer, session_id, cwd, turn_id, events, effort: config.effort, approvals })
     }
 }
 
@@ -378,6 +405,10 @@ impl AgentSession for MuseSession {
 
     async fn next_event(&mut self) -> Option<AgentEvent> {
         self.events.recv().await
+    }
+
+    async fn respond_approval(&mut self, id: &str, approved: bool) -> Result<(), SessionError> {
+        self.approvals.resolve(id, approved).await
     }
 
     async fn interrupt(&mut self) -> Result<(), SessionError> {
@@ -410,7 +441,8 @@ mod tests {
     fn test_policy_mapping() {
         assert_eq!(policy_for(&cfg(AgentMode::Plan, false)).approval_mode, "denyUnmatched");
         let accept = policy_for(&cfg(AgentMode::AcceptEdits, false));
-        assert_eq!((accept.approval_mode, accept.auto_accept), ("promptUnmatched", false));
+        assert_eq!((accept.approval_mode, accept.auto_accept, accept.ask), ("promptUnmatched", false, true));
+        assert!(!policy_for(&cfg(AgentMode::Plan, false)).ask);
         assert!(policy_for(&cfg(AgentMode::Auto, false)).auto_accept);
         let skip = policy_for(&cfg(AgentMode::Plan, true));
         assert_eq!((skip.permission_profile, skip.disable_sandbox), (":unrestricted", true));

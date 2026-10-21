@@ -101,6 +101,32 @@ async fn test_approval_is_rejected_in_accept_edits() {
 }
 
 #[tokio::test]
+async fn test_approval_is_asked_and_the_answer_reaches_muse() {
+    let (_dir, driver, db, thread_id) = setup();
+    let mut session = driver.start_session(config(AgentMode::AcceptEdits)).await.unwrap();
+
+    let mut asked = Vec::new();
+    let summary = run_turn(
+        session.as_mut(),
+        &db,
+        &thread_id,
+        "liste",
+        std::future::pending(),
+        async |request: &rusi::session::ApprovalRequest| {
+            asked.push(request.tool.clone());
+            true
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    session.close().await;
+
+    assert_eq!(asked, ["bash"]);
+    assert_eq!(summary.text, "feito: yes");
+}
+
+#[tokio::test]
 async fn test_auto_mode_approves() {
     let (_dir, driver, db, thread_id) = setup();
     let mut session = driver.start_session(config(AgentMode::Auto)).await.unwrap();

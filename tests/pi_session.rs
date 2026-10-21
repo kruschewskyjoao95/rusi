@@ -26,6 +26,12 @@ for line in sys.stdin:
         text = m["message"]
         out({"type": "response", "id": mid, "command": "prompt", "success": True, "data": {"disposition": "started"}})
         out({"type": "agent_start"})
+        if "gate" in text:
+            out({"type": "extension_ui_request", "id": "u1", "method": "confirm", "title": "bash", "message": "{\"command\":\"ls\"}"})
+            ans = json.loads(sys.stdin.readline())
+            out({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "confirmed=%s" % ans.get("confirmed")}], "stopReason": "stop"}})
+            out({"type": "agent_settled", "aborted": False})
+            continue
         if "slow" in text:
             out({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "pensando"}})
             continue
@@ -87,4 +93,30 @@ async fn test_abort_settles_the_turn() {
         .unwrap();
     assert_eq!(next.text, "ola mundo");
     session.close().await;
+}
+
+#[tokio::test]
+async fn test_approval_is_asked_and_the_answer_reaches_pi() {
+    let (_dir, driver, db, thread_id) = setup();
+    for answer in [true, false] {
+        let mut session = driver.start_session(SessionConfig { mode: AgentMode::AcceptEdits, ..Default::default() }).await.unwrap();
+        let mut asked = Vec::new();
+        let summary = run_turn(
+            session.as_mut(),
+            &db,
+            &thread_id,
+            "gate",
+            std::future::pending(),
+            async |request: &rusi::session::ApprovalRequest| {
+                asked.push((request.tool.clone(), request.input.clone()));
+                answer
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+        session.close().await;
+        assert_eq!(asked, [("bash".to_string(), serde_json::json!({"command": "ls"}))]);
+        assert_eq!(summary.text, format!("confirmed={}", if answer { "True" } else { "False" }));
+    }
 }

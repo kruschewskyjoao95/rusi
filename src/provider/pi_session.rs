@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,22 +14,43 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::config::{AgentMode, EffortLevel};
-use crate::session::{AgentEvent, AgentSession, SessionConfig, SessionError, TokenUsage};
+use crate::session::{AgentEvent, AgentSession, ApprovalRequest, PendingApprovals, SessionConfig, SessionError, TokenUsage};
 use crate::tools::process::kill_process_group;
 
 const STDERR_TAIL_LINES: usize = 20;
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// O Pi não tem aprovações: executa as ferramentas direto. Sem como pedir confirmação,
-/// `plan` e `accept-edits` limitam o agente a ferramentas de leitura.
+/// O Pi não tem aprovações nativas: executa as ferramentas direto. `plan` limita o agente a
+/// ferramentas de leitura; em `accept-edits` uma extensão (`pi_gate.ts`) pergunta ao usuário.
 const READ_ONLY_TOOLS: &str = "read,grep,find,ls";
+const GATE_EXTENSION: &str = include_str!("pi_gate.ts");
 
-pub(super) fn build_args(config: &SessionConfig) -> Vec<String> {
+/// Grava a extensão no diretório de dados do Rusi; `None` se não der (o chamador cai para só leitura).
+fn write_gate() -> Option<PathBuf> {
+    let dir = dirs::data_dir()?.join("rusi");
+    let path = dir.join("pi-gate.ts");
+    if std::fs::read_to_string(&path).is_ok_and(|current| current == GATE_EXTENSION) {
+        return Some(path);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    // Renomear evita que um `pi` já iniciando leia o arquivo pela metade.
+    let tmp = dir.join(format!("pi-gate.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, GATE_EXTENSION).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path)
+}
+
+/// `gate`: caminho da extensão de aprovação, usado só em `accept-edits`.
+pub(super) fn build_args(config: &SessionConfig, gate: Option<&Path>) -> Vec<String> {
     let mut args = vec!["--mode".to_string(), "rpc".to_string()];
     let unrestricted = config.dangerously_skip_permissions || config.mode == AgentMode::Auto;
-    if !unrestricted {
-        args.extend(["--tools".into(), READ_ONLY_TOOLS.into()]);
+    match gate {
+        Some(path) if !unrestricted && config.mode == AgentMode::AcceptEdits => {
+            args.extend(["--extension".into(), path.display().to_string()]);
+        }
+        _ if !unrestricted => args.extend(["--tools".into(), READ_ONLY_TOOLS.into()]),
+        _ => {}
     }
     let thinking = match config.effort {
         EffortLevel::Low => "low",
@@ -170,6 +191,7 @@ pub struct PiSession {
     events: mpsc::UnboundedReceiver<AgentEvent>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     next_id: u64,
+    approvals: PendingApprovals,
 }
 
 fn tail_summary(tail: &Mutex<VecDeque<String>>) -> Option<String> {
@@ -194,8 +216,10 @@ async fn write_line(stdin: &AsyncMutex<Option<ChildStdin>>, value: &Value, tail:
 
 impl PiSession {
     pub(super) async fn start(binary: &Path, config: &SessionConfig) -> Result<Self, SessionError> {
+        let gate = (config.mode == AgentMode::AcceptEdits && !config.dangerously_skip_permissions).then(write_gate).flatten();
+        let ask = gate.is_some();
         let mut cmd = Command::new(binary);
-        cmd.args(build_args(config))
+        cmd.args(build_args(config, gate.as_deref()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -233,7 +257,7 @@ impl PiSession {
             }
         });
 
-        let mut session = Self { child, stdin, events: mpsc::unbounded_channel().1, stderr_tail, next_id: 1 };
+        let mut session = Self { child, stdin, events: mpsc::unbounded_channel().1, stderr_tail, next_id: 1, approvals: PendingApprovals::default() };
 
         // Handshake: get_state devolve o arquivo da sessão (id durável para retomar).
         let state = match session.handshake(&mut raw_rx).await {
@@ -264,9 +288,26 @@ impl PiSession {
         let auto_accept = config.dangerously_skip_permissions || config.mode == AgentMode::Auto;
         let ui_stdin = session.stdin.clone();
         let ui_tail = session.stderr_tail.clone();
+        let approvals = session.approvals.clone();
         tokio::spawn(async move {
             let mut translator = Translator::default();
             while let Some(event) = raw_rx.recv().await {
+                if ask && event["type"] == "extension_ui_request" && event["method"] == "confirm"
+                    && let Some(id) = event["id"].as_str()
+                {
+                    // `message` é o JSON da entrada da ferramenta (ver `pi_gate.ts`).
+                    let input = event["message"].as_str().map_or(Value::Null, |m| serde_json::from_str(m).unwrap_or_else(|_| json!(m)));
+                    let request = ApprovalRequest { id: id.to_string(), tool: event["title"].as_str().unwrap_or("tool").to_string(), input };
+                    let (stdin, tail, reply_id) = (ui_stdin.clone(), ui_tail.clone(), id.to_string());
+                    approvals.register(reply_id.clone(), move |approved| async move {
+                        let reply = json!({ "type": "extension_ui_response", "id": reply_id, "confirmed": approved });
+                        let _ = write_line(&stdin, &reply, &tail).await;
+                    });
+                    if tx.send(AgentEvent::ApprovalRequested(request)).is_err() {
+                        return;
+                    }
+                    continue;
+                }
                 if event["type"] == "extension_ui_request"
                     && let Some(reply) = ui_reply(&event, auto_accept)
                 {
@@ -322,6 +363,10 @@ impl AgentSession for PiSession {
         self.events.recv().await
     }
 
+    async fn respond_approval(&mut self, id: &str, approved: bool) -> Result<(), SessionError> {
+        self.approvals.resolve(id, approved).await
+    }
+
     async fn interrupt(&mut self) -> Result<(), SessionError> {
         let id = self.take_id();
         write_line(&self.stdin, &json!({ "type": "abort", "id": id }), &self.stderr_tail).await
@@ -344,14 +389,16 @@ mod tests {
 
     #[test]
     fn test_args_restrict_tools_unless_auto() {
-        let plan = build_args(&SessionConfig { mode: AgentMode::Plan, ..Default::default() }).join(" ");
-        assert!(plan.contains("--tools read,grep,find,ls"));
-        let edits = build_args(&SessionConfig { mode: AgentMode::AcceptEdits, ..Default::default() }).join(" ");
-        assert!(edits.contains("--tools"));
-        let auto = build_args(&SessionConfig { mode: AgentMode::Auto, ..Default::default() }).join(" ");
-        assert!(!auto.contains("--tools"));
-        let skip = build_args(&SessionConfig { dangerously_skip_permissions: true, ..Default::default() }).join(" ");
-        assert!(!skip.contains("--tools"));
+        let gate = Path::new("/g/pi-gate.ts");
+        let args = |mode, skip, gate| build_args(&SessionConfig { mode, dangerously_skip_permissions: skip, ..Default::default() }, gate).join(" ");
+        assert!(args(AgentMode::Plan, false, Some(gate)).contains("--tools read,grep,find,ls"));
+        // accept-edits: a extensão pergunta, então as ferramentas ficam liberadas; sem ela, só leitura.
+        let edits = args(AgentMode::AcceptEdits, false, Some(gate));
+        assert!(edits.contains("--extension /g/pi-gate.ts") && !edits.contains("--tools"));
+        assert!(args(AgentMode::AcceptEdits, false, None).contains("--tools"));
+        assert!(!args(AgentMode::Auto, false, None).contains("--tools"));
+        let skip = args(AgentMode::AcceptEdits, true, Some(gate));
+        assert!(!skip.contains("--tools") && !skip.contains("--extension"));
     }
 
     #[test]
@@ -362,7 +409,7 @@ mod tests {
             resume: Some("/s/file.jsonl".into()),
             mode: AgentMode::Auto,
             ..Default::default()
-        })
+        }, None)
         .join(" ");
         assert!(args.starts_with("--mode rpc"));
         assert!(args.contains("--thinking high") && args.contains("--model anthropic/x") && args.contains("--session /s/file.jsonl"));
