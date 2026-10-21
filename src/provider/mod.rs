@@ -3,12 +3,12 @@
 
 mod acp_session;
 mod antigravity;
-pub mod antigravity_auth;
-pub mod antigravity_install;
+mod agy_session;
 mod claude;
 mod claude_session;
 mod cursor;
 mod cursor_session;
+mod print_session;
 mod codex;
 mod codex_session;
 mod grok;
@@ -26,7 +26,7 @@ pub use codex::{CodexDriver, parse_account};
 pub use muse::MuseDriver;
 pub use opencode::OpenCodeDriver;
 pub use pi::{PiDriver, parse_auth_check};
-pub use antigravity::{AntigravityDriver, harness_for, parse_token_file};
+pub use antigravity::AntigravityDriver;
 pub use cursor::{CursorDriver, parse_status_output};
 pub use grok::{GrokDriver, parse_models_output};
 pub use cli_probe::{CliProbeDriver, resolve_binary};

@@ -141,9 +141,6 @@ impl ProviderDriver for GrokDriver {
             plan_mode: config.mode == AgentMode::Plan && !config.dangerously_skip_permissions,
             auth_method,
             login_hint: "Grok sem login: execute `grok login`".to_string(),
-            eager_auth_method: None,
-            prefer_resume: false,
-            session_mode: None,
         };
         Ok(Box::new(AcpSession::start(options, &config).await?))
     }

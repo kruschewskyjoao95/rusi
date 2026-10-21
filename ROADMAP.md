@@ -9,9 +9,9 @@ Ver `PROJECT.md` para arquitetura e princípios.
 - [x] SQLite com migrations, threads/eventos, `--continue`; keyring (`rusi secrets`).
 - [x] `AgentSession`/`AgentEvent` neutros + `run_turn` com persistência e retomada.
 - [x] Drivers com sessão: Claude (stream-json), Codex (app-server), Muse (MSP), Pi (RPC),
-      Grok e Antigravity (ACP), Cursor, OpenCode.
-- [x] Instalação gerenciada do Antigravity.
-- [ ] Login do Antigravity (`rusi antigravity login` hoje recusa): enviar `authenticate` ao `agy_acp_server`, usar o redirect dele e verificar o hash do download.
+      Grok (ACP), Antigravity (`agy -p`), Cursor, OpenCode.
+- [x] Antigravity pelo `agy` oficial (um processo por turno, como o Cursor); o login é do próprio `agy`.
+- [ ] Aprovações do Antigravity: em `-p` o `agy` roda tudo (`always-proceed`); `accept-edits` usa `--sandbox` em vez de perguntar.
 
 ## Fase 1 — Aprovações e modos (Claude, Codex e ACP feitos)
 
@@ -19,7 +19,7 @@ Ver `PROJECT.md` para arquitetura e princípios.
       `AgentSession::respond_approval(id, approved)` (padrão: `NotReady`).
 - [x] Claude: `control_request` `can_use_tool` (`--permission-prompts host --permission-prompt-tool stdio`).
 - [x] Codex: `item/*/requestApproval` repassado ao usuário em `accept-edits`.
-- [x] ACP (Grok/Antigravity): `session/request_permission` → evento.
+- [x] ACP (Grok): `session/request_permission` → evento.
 - [x] `run_turn` recebe um *approver*; o CLI pergunta no terminal (`[s]im / [N]ão`); sem terminal nega.
 - [x] Testes com agentes falsos por protocolo; Claude validado ao vivo.
 - [x] Muse, Pi e OpenCode perguntam em `accept-edits` (o Pi por uma extensão que o Rusi carrega, `src/provider/pi_gate.ts`).

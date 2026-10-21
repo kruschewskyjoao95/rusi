@@ -1,37 +1,26 @@
-//! Driver do Antigravity (Google): o `agy_acp_server` oficial, via ACP, com um perfil
-//! privado (`GEMINI_HOME`) onde ele guarda `antigravity-acp/acp_token.json`.
-//!
-//! Este módulo cobre detecção do binário, estado do login e sessões. Instalação
-//! gerenciada e login OAuth loopback implementados na fase 4.
+//! Driver do Antigravity (Google): o CLI oficial `agy`, um processo por turno (ver `agy_session`).
+//! O login é do próprio `agy` (feito na primeira execução interativa); o Rusi só confere
+//! com `agy models`, que falha sem login.
 
 use async_trait::async_trait;
-use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use super::acp_session::{AcpOptions, AcpSession};
-use super::cli_probe::resolve_binary;
+use super::agy_session;
+use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary, run_stdout};
 use super::snapshot::{AuthState, ProviderSnapshot};
 use super::ProviderDriver;
-use crate::config::AgentMode;
 use crate::session::{AgentSession, SessionConfig, SessionError};
 
-const PERSONAL_AUTH_METHOD: &str = "oauth-personal";
-const SIGN_IN_HINT: &str =
-    "Antigravity sem login: execute `rusi antigravity login` (requer assinatura elegível)";
-
-/// Nomes do executável do servidor ACP, na ordem de preferência.
-const EXECUTABLE_NAMES: &[&str] = &["agy_acp_server", "agy-acp-server"];
-/// O servidor precisa do harness ao lado dele.
-const HARNESS_NAME: &str = "localharness_external";
+const BINARIES: &[&str] = &["agy", "antigravity"];
+const SIGN_IN_HINT: &str = "execute `agy` no terminal e faça login";
 
 pub struct AntigravityDriver {
     binary: Option<PathBuf>,
-    profile_dir: Option<PathBuf>,
 }
 
 impl AntigravityDriver {
     pub fn new() -> Self {
-        Self { binary: None, profile_dir: None }
+        Self { binary: None }
     }
 
     pub fn with_binary(mut self, binary: PathBuf) -> Self {
@@ -39,27 +28,8 @@ impl AntigravityDriver {
         self
     }
 
-    pub fn with_profile_dir(mut self, dir: PathBuf) -> Self {
-        self.profile_dir = Some(dir);
-        self
-    }
-
-    /// Perfil privado do Rusi para o Antigravity (nunca o `~/.gemini` do usuário).
-    fn profile_dir(&self) -> Option<PathBuf> {
-        self.profile_dir
-            .clone()
-            .or_else(|| dirs::data_dir().map(|d| d.join("rusi").join("profiles").join("antigravity")))
-    }
-
-    /// Instalação gerenciada pelo Rusi primeiro, depois PATH.
     fn find_binary(&self) -> Option<PathBuf> {
-        if let Some(binary) = &self.binary {
-            return Some(binary.clone());
-        }
-        let managed: Vec<PathBuf> = dirs::data_dir()
-            .map(|d| vec![d.join("rusi").join("installs").join("antigravity")])
-            .unwrap_or_default();
-        resolve_binary(EXECUTABLE_NAMES, &managed)
+        self.binary.clone().or_else(|| resolve_binary(BINARIES, &default_extra_dirs()))
     }
 }
 
@@ -69,70 +39,9 @@ impl Default for AntigravityDriver {
     }
 }
 
-/// Caminho do harness ao lado do executável; `None` se não existir.
-/// Aceita tanto `localharness_external` quanto `localharness_external.par/.exe`.
-pub fn harness_for(executable: &Path) -> Option<PathBuf> {
-    let dir = executable.parent()?;
-    for name in [HARNESS_NAME, "localharness_external.par", "localharness_external.exe"] {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Lê o `acp_token.json` só para saber se há login; o conteúdo nunca sai daqui.
-pub fn parse_token_file(raw: &str) -> AuthState {
-    let Ok(v) = serde_json::from_str::<Value>(raw) else {
-        return AuthState::Unknown;
-    };
-    if v["refresh_token"].as_str().is_some_and(|t| !t.is_empty()) {
-        AuthState::Authenticated { account: Some("Google account".to_string()) }
-    } else {
-        AuthState::Unauthenticated
-    }
-}
-
-fn token_path(profile_dir: &Path) -> PathBuf {
-    profile_dir.join("antigravity-acp").join("acp_token.json")
-}
-
-/// Variáveis de ambiente do agente: perfil isolado, armazenamento em arquivo e sem navegador.
-pub(super) fn agent_env(profile_dir: &Path, harness: &Path, base_home: Option<&str>) -> Vec<(String, String)> {
-    let tmp = profile_dir.join("antigravity-acp").join("tmp");
-    let mut env = vec![
-        ("GEMINI_HOME".to_string(), profile_dir.display().to_string()),
-        ("AGY_ACP_FORCE_FILE_STORAGE".to_string(), "1".to_string()),
-        // Sessões normais não podem abrir o navegador; o login (fase 4) é um fluxo à parte.
-        ("BROWSER".to_string(), "/bin/false".to_string()),
-        ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
-        ("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string()),
-        ("TMPDIR".to_string(), tmp.display().to_string()),
-        ("ANTIGRAVITY_HARNESS_PATH".to_string(), harness.display().to_string()),
-    ];
-    if let Some(home) = base_home {
-        env.push(("HOME".to_string(), home.to_string()));
-    }
-    env
-}
-
-fn prepare_profile(profile_dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    for dir in [profile_dir.to_path_buf(), profile_dir.join("antigravity-acp"), profile_dir.join("antigravity-acp").join("tmp")] {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-/// Modo de sessão do Antigravity para o modo do Rusi.
-pub(super) fn session_mode_for(config: &SessionConfig) -> &'static str {
-    if config.dangerously_skip_permissions { "yolo" } else { "default" }
-}
-
-fn no_auth_method(_initialized: &Value) -> Option<String> {
-    None
+/// Os ids de `agy models`: uma linha `id<TAB>rótulo` por modelo.
+pub fn parse_models(output: &str) -> Vec<String> {
+    output.lines().filter_map(|l| l.split('\t').next()).map(str::trim).filter(|id| !id.is_empty()).map(String::from).collect()
 }
 
 #[async_trait]
@@ -142,36 +51,16 @@ impl ProviderDriver for AntigravityDriver {
     }
 
     fn display_name(&self) -> &'static str {
-        "Antigravity (Google)"
+        "Antigravity"
     }
 
     async fn snapshot(&self) -> ProviderSnapshot {
         let Some(binary) = self.find_binary() else {
-            return ProviderSnapshot::unavailable(
-                self.id(),
-                self.display_name(),
-                "`agy_acp_server` não instalado — execute `rusi antigravity install`",
-            );
+            return ProviderSnapshot::unavailable(self.id(), self.display_name(), "`agy` não encontrado no PATH");
         };
-        // tenta ler versão do binário e do registro de instalação
-        let version = super::cli_probe::probe_version(&binary).await.or_else(|| {
-            self.profile_dir()
-                .as_ref()
-                .and_then(|_| super::antigravity_install::read_complete(
-                    &super::antigravity_install::install_dir().unwrap_or_default(),
-                ))
-                .map(|c| c.version)
-        });
-        let auth = match self.profile_dir().map(|d| token_path(&d)).map(std::fs::read_to_string) {
-            Some(Ok(raw)) => parse_token_file(&raw),
-            Some(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => AuthState::Unauthenticated,
-            _ => AuthState::Unknown,
-        };
-        let message = match (&auth, harness_for(&binary)) {
-            (_, None) => Some(format!("falta `{HARNESS_NAME}` ao lado do executável")),
-            (AuthState::Unauthenticated, _) => Some(SIGN_IN_HINT.to_string()),
-            _ => None,
-        };
+        let (version, models) = tokio::join!(probe_version(&binary), run_stdout(&binary, &["models"]));
+        let auth = if models.is_some() { AuthState::Authenticated { account: None } } else { AuthState::Unauthenticated };
+        let message = (auth == AuthState::Unauthenticated).then(|| SIGN_IN_HINT.to_string());
         ProviderSnapshot {
             id: self.id().to_string(),
             display_name: self.display_name().to_string(),
@@ -183,32 +72,17 @@ impl ProviderDriver for AntigravityDriver {
         }
     }
 
-    async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {
-        let binary = self.find_binary().ok_or_else(|| {
-            SessionError::NotReady("`agy_acp_server` não instalado — execute `rusi antigravity install`".into())
-        })?;
-        let harness = harness_for(&binary).ok_or_else(|| {
-            SessionError::NotReady(format!("falta `{HARNESS_NAME}` ao lado de {}", binary.display()))
-        })?;
-        let profile_dir = self
-            .profile_dir()
-            .ok_or_else(|| SessionError::NotReady("sem diretório de dados do usuário para o perfil".into()))?;
-        prepare_profile(&profile_dir)?;
+    async fn models(&self) -> Vec<String> {
+        let Some(binary) = self.find_binary() else { return Vec::new() };
+        run_stdout(&binary, &["models"]).await.map(|out| parse_models(&out)).unwrap_or_default()
+    }
 
-        let options = AcpOptions {
-            binary,
-            args: if cfg!(target_os = "linux") { vec!["--uid=".to_string()] } else { Vec::new() },
-            env: agent_env(&profile_dir, &harness, None),
-            init_meta: None,
-            auto_accept: config.dangerously_skip_permissions || config.mode == AgentMode::Auto,
-            plan_mode: config.mode == AgentMode::Plan && !config.dangerously_skip_permissions,
-            auth_method: no_auth_method,
-            login_hint: SIGN_IN_HINT.to_string(),
-            eager_auth_method: Some(PERSONAL_AUTH_METHOD.to_string()),
-            prefer_resume: true,
-            session_mode: Some(session_mode_for(&config)),
-        };
-        Ok(Box::new(AcpSession::start(options, &config).await?))
+    async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {
+        let binary = self.find_binary().ok_or_else(|| SessionError::NotReady("`agy` não encontrado no PATH".into()))?;
+        if self.binary.is_none() && run_stdout(&binary, &["models"]).await.is_none() {
+            return Err(SessionError::NotReady(format!("Antigravity sem login: {SIGN_IN_HINT}")));
+        }
+        Ok(Box::new(agy_session::session(&binary, &config)))
     }
 }
 
@@ -217,42 +91,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_token_file() {
-        assert!(matches!(
-            parse_token_file(r#"{"client_id":"x","client_secret":"y","refresh_token":"r"}"#),
-            AuthState::Authenticated { .. }
-        ));
-        assert_eq!(parse_token_file(r#"{"refresh_token":""}"#), AuthState::Unauthenticated);
-        assert_eq!(parse_token_file("lixo"), AuthState::Unknown);
-    }
-
-    #[test]
-    fn test_session_mode_mapping() {
-        assert_eq!(session_mode_for(&SessionConfig::default()), "default");
-        assert_eq!(
-            session_mode_for(&SessionConfig { dangerously_skip_permissions: true, ..Default::default() }),
-            "yolo"
-        );
-    }
-
-    #[test]
-    fn test_env_isolates_profile_and_blocks_browser() {
-        let env = agent_env(Path::new("/p"), Path::new("/i/localharness_external"), None);
-        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("GEMINI_HOME"), Some("/p"));
-        assert_eq!(get("BROWSER"), Some("/bin/false"));
-        assert_eq!(get("ANTIGRAVITY_HARNESS_PATH"), Some("/i/localharness_external"));
-        assert_eq!(get("TMPDIR"), Some("/p/antigravity-acp/tmp"));
-        assert_eq!(get("AGY_ACP_FORCE_FILE_STORAGE"), Some("1"));
-    }
-
-    #[test]
-    fn test_harness_must_sit_next_to_executable() {
-        let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("agy_acp_server");
-        std::fs::write(&exe, "").unwrap();
-        assert_eq!(harness_for(&exe), None);
-        std::fs::write(dir.path().join(HARNESS_NAME), "").unwrap();
-        assert_eq!(harness_for(&exe), Some(dir.path().join(HARNESS_NAME)));
+    fn test_parse_models() {
+        assert_eq!(parse_models("gemini-4-argon-medium\tGemini 4\nclaude-opus-5-5-high\tOpus\n\n"), ["gemini-4-argon-medium", "claude-opus-5-5-high"]);
+        assert!(parse_models("").is_empty());
     }
 }

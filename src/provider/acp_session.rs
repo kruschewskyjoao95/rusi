@@ -33,12 +33,6 @@ pub(super) struct AcpOptions {
     pub auth_method: fn(&Value) -> Option<String>,
     /// Mensagem quando não há como autenticar a partir daqui.
     pub login_hint: String,
-    /// Autentica logo após o `initialize` com este método, sem esperar o agente exigir.
-    pub eager_auth_method: Option<String>,
-    /// Retoma com `session/resume` quando o agente o anuncia, mesmo que também tenha `session/load`.
-    pub prefer_resume: bool,
-    /// Modo de sessão a aplicar com `session/set_mode` (ex: `yolo`), se o agente o anunciar.
-    pub session_mode: Option<&'static str>,
 }
 
 fn permission_tool(params: &Value) -> String {
@@ -204,13 +198,12 @@ async fn open_session(
     config: &SessionConfig,
     initialized: &Value,
     cwd: &str,
-    prefer_resume: bool,
 ) -> Result<Value, RpcError> {
     let caps = &initialized["agentCapabilities"];
     let can_resume = !caps["sessionCapabilities"]["resume"].is_null();
     let can_load = caps["loadSession"] == true;
     let (method, params) = match &config.resume {
-        Some(id) if can_load && !(prefer_resume && can_resume) => {
+        Some(id) if can_load => {
             ("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] }))
         }
         Some(id) if can_resume => {
@@ -328,17 +321,7 @@ impl AcpSession {
         }
         let initialized = peer.request("initialize", init).await.map_err(rpc_to_session)?;
 
-        if let Some(method_id) = &options.eager_auth_method {
-            tokio::time::timeout(AUTH_TIMEOUT, peer.request("authenticate", json!({ "methodId": method_id })))
-                .await
-                .map_err(|_| SessionError::NotReady(options.login_hint.clone()))?
-                .map_err(|err| match err {
-                    RpcError::Remote { .. } => SessionError::NotReady(options.login_hint.clone()),
-                    other => rpc_to_session(other),
-                })?;
-        }
-
-        let opened = match open_session(peer, config, &initialized, cwd, options.prefer_resume).await {
+        let opened = match open_session(peer, config, &initialized, cwd).await {
             Err(err) if is_auth_required(&err) => {
                 let Some(method_id) = (options.auth_method)(&initialized) else {
                     return Err(SessionError::NotReady(options.login_hint.clone()));
@@ -347,7 +330,7 @@ impl AcpSession {
                     .await
                     .map_err(|_| SessionError::NotReady(options.login_hint.clone()))?
                     .map_err(rpc_to_session)?;
-                open_session(peer, config, &initialized, cwd, options.prefer_resume).await.map_err(rpc_to_session)?
+                open_session(peer, config, &initialized, cwd).await.map_err(rpc_to_session)?
             }
             other => other.map_err(rpc_to_session)?,
         };
@@ -360,14 +343,11 @@ impl AcpSession {
                 .to_string(),
         };
 
-        let advertises = |mode: &str| {
-            opened["modes"]["availableModes"]
-                .as_array()
-                .is_some_and(|modes| modes.iter().any(|m| m["id"] == mode))
-        };
-        let wanted_mode = if options.plan_mode && advertises("plan") { Some("plan") } else { options.session_mode };
-        if let Some(mode) = wanted_mode {
-            let _ = peer.request("session/set_mode", json!({ "sessionId": session_id, "modeId": mode })).await;
+        let plan_advertised = opened["modes"]["availableModes"]
+            .as_array()
+            .is_some_and(|modes| modes.iter().any(|m| m["id"] == "plan"));
+        if options.plan_mode && plan_advertised {
+            let _ = peer.request("session/set_mode", json!({ "sessionId": session_id, "modeId": "plan" })).await;
         }
         if let Some(model) = &config.model {
             let _ = peer.request("session/set_model", json!({ "sessionId": session_id, "modelId": model })).await;

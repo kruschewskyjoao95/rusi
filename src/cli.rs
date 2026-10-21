@@ -85,32 +85,11 @@ pub enum Commands {
         thread: String,
     },
 
-    /// Gerenciar instalação e login do Antigravity (Google)
-    Antigravity(AntigravityArgs),
-
     /// Exibir informações de instalação e autocomplete
     Install,
 
     /// Verificar versão e atualizações do Rusi
     Update,
-}
-
-#[derive(Args, Debug)]
-pub struct AntigravityArgs {
-    #[command(subcommand)]
-    pub command: AntigravityCommands,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum AntigravityCommands {
-    /// Instala/atualiza o `agy_acp_server` gerenciado (~/.local/share/rusi/installs/antigravity)
-    Install,
-    /// Realiza login OAuth Google via loopback 127.0.0.1 (state 5 min, iss Google)
-    Login,
-    /// Mostra status da instalação e do token
-    Status,
-    /// Remove o token de login (logout)
-    Logout,
 }
 
 #[derive(Args, Debug)]
@@ -287,81 +266,8 @@ pub fn handle_command(cmd: &Commands, config: &mut Config) -> Result<(), Box<dyn
         Commands::Git(args) => block_on(handle_git_command(&args.command))?,
         Commands::Changes { thread } => handle_changes_command(thread)?,
         Commands::Config(cfg_args) => handle_config_command(cfg_args.command.as_ref(), config)?,
-        Commands::Antigravity(args) => handle_antigravity_command(&args.command)?,
         Commands::Install => handle_install_command(),
         Commands::Update => handle_update_command(),
-    }
-    Ok(())
-}
-
-fn handle_antigravity_command(cmd: &AntigravityCommands) -> Result<(), Box<dyn std::error::Error>> {
-    match cmd {
-        AntigravityCommands::Install => handle_antigravity_install()?,
-        AntigravityCommands::Login => handle_antigravity_login()?,
-        AntigravityCommands::Status => handle_antigravity_status()?,
-        AntigravityCommands::Logout => handle_antigravity_logout()?,
-    }
-    Ok(())
-}
-
-fn handle_antigravity_install() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::provider::antigravity_install;
-    println!("{}", "Instalando Antigravity (agy_acp_server)...".cyan().bold());
-    let url = antigravity_install::download_url_for_current()?;
-    println!("  URL: {}", url.dimmed());
-    let dir = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(antigravity_install::install(None))
-    })?;
-    println!("{} Instalado em {}", "✔".green().bold(), dir.display().to_string().cyan());
-    if let Some(complete) = antigravity_install::read_complete(&dir) {
-        println!("  versão: {}  sha256: {}…", complete.version, &complete.release_id[..12]);
-    }
-    Ok(())
-}
-
-fn handle_antigravity_login() -> Result<(), Box<dyn std::error::Error>> {
-    // O fluxo antigo não completava: usava um redirect próprio, enquanto o `agy_acp_server`
-    // abre o navegador com o dele, e nunca enviava `authenticate`. Fica para depois.
-    Err("login do Antigravity ainda não é suportado pelo Rusi".into())
-}
-
-fn handle_antigravity_status() -> Result<(), Box<dyn std::error::Error>> {
-    use crate::provider::{AntigravityDriver, ProviderDriver};
-    let driver = AntigravityDriver::new();
-    let snap = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(driver.snapshot())
-    });
-    println!("\n{}", "=== Antigravity Status ===".cyan().bold());
-    println!("  instalado: {}", if snap.installed { "sim".green() } else { "não".red() });
-    if let Some(v) = snap.version {
-        println!("  versão: {v}");
-    }
-    if let Some(b) = snap.binary {
-        println!("  binário: {}", b.display().to_string().dimmed());
-    }
-    println!("  auth: {:?}", snap.auth);
-    if let Some(m) = snap.message {
-        println!("  {}", m.yellow());
-    }
-    if let Some(dir) = crate::provider::antigravity_install::install_dir() {
-        if let Some(c) = crate::provider::antigravity_install::read_complete(&dir) {
-            println!("  release: {} ({} bytes, sha256 {}…)", c.version, c.bytes, &c.release_id[..12]);
-        }
-        println!("  dir: {}", dir.display().to_string().dimmed());
-    }
-    println!();
-    Ok(())
-}
-
-fn handle_antigravity_logout() -> Result<(), Box<dyn std::error::Error>> {
-    let token = dirs::data_dir()
-        .map(|d| d.join("rusi").join("profiles").join("antigravity").join("antigravity-acp").join("acp_token.json"))
-        .ok_or("sem data_dir")?;
-    if token.exists() {
-        std::fs::remove_file(&token)?;
-        println!("{} Token removido: {}", "✔".green().bold(), token.display().to_string().cyan());
-    } else {
-        println!("{} Nenhum token encontrado.", "ℹ".blue().bold());
     }
     Ok(())
 }
