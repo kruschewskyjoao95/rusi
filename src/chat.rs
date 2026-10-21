@@ -68,7 +68,7 @@ fn open_thread(db: &Database, config: &Config, options: &ChatOptions) -> Result<
     })?)
 }
 
-fn title_from(prompt: &str) -> String {
+pub fn title_from(prompt: &str) -> String {
     let first_line = prompt.lines().next().unwrap_or("").trim();
     first_line.chars().take(60).collect()
 }

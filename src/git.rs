@@ -14,6 +14,10 @@ use tokio::process::Command;
 use crate::persistence::{Database, DbError};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// Hooks de pre-commit (testes, lint) podem demorar bem mais que um comando normal.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Arquivo não rastreado maior que isso fica fora do snapshot (não é lido nem gravado no repositório).
+const SNAPSHOT_FILE_CAP: u64 = 1024 * 1024;
 const OUT_CAP: usize = 2 * 1024 * 1024;
 /// Teto de um patch por arquivo e de arquivos listados por turno.
 const FILE_PATCH_CAP: usize = 256 * 1024;
@@ -65,7 +69,7 @@ pub struct FileChange {
     pub truncated: bool,
 }
 
-async fn run(cwd: &Path, args: &[&str], env: &[(&str, OsString)], cap: usize) -> Result<String, GitError> {
+async fn run(cwd: &Path, args: &[&str], env: &[(&str, OsString)], cap: usize, timeout: Duration) -> Result<String, GitError> {
     let mut cmd = Command::new("git");
     cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=never"])
         .args(args)
@@ -105,11 +109,11 @@ async fn run(cwd: &Path, args: &[&str], env: &[(&str, OsString)], cap: usize) ->
         }
         Ok(text)
     };
-    tokio::time::timeout(TIMEOUT, work).await.map_err(|_| GitError::Timeout(TIMEOUT.as_secs()))?
+    tokio::time::timeout(timeout, work).await.map_err(|_| GitError::Timeout(timeout.as_secs()))?
 }
 
 async fn git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
-    run(cwd, args, &[], OUT_CAP).await
+    run(cwd, args, &[], OUT_CAP, TIMEOUT).await
 }
 
 /// Raiz do checkout que contém `cwd`, ou `None` se não for um repositório.
@@ -151,7 +155,7 @@ pub async fn unstage(cwd: &Path, paths: &[String]) -> Result<(), GitError> {
 }
 
 pub async fn commit(cwd: &Path, message: &str) -> Result<(), GitError> {
-    git(cwd, &["commit", "-m", message]).await.map(drop)
+    run(cwd, &["commit", "-m", message], &[], OUT_CAP, COMMIT_TIMEOUT).await.map(drop)
 }
 
 pub async fn branches(cwd: &Path) -> Result<Vec<String>, GitError> {
@@ -240,15 +244,32 @@ impl Database {
 
 /// Foto do conteúdo do diretório como árvore git, sem tocar no índice nem nas refs do usuário:
 /// usa um índice temporário (`GIT_INDEX_FILE`) semeado com HEAD e `add -A` (respeita .gitignore).
+async fn in_index(root: &Path, env: &[(&str, OsString)], args: &[&str]) -> Result<String, GitError> {
+    run(root, args, env, OUT_CAP, TIMEOUT).await
+}
+
 pub async fn snapshot(cwd: &Path) -> Result<String, GitError> {
     let git_dir = git(cwd, &["rev-parse", "--absolute-git-dir"]).await?;
+    let root = toplevel(cwd).await.ok_or_else(|| GitError::Other("não é um repositório git".into()))?;
     let index = PathBuf::from(git_dir.trim()).join(format!("rusi-index-{}", uuid::Uuid::new_v4()));
     let env = [("GIT_INDEX_FILE", index.clone().into_os_string())];
     let result = async {
-        // Repositório sem commits: o índice temporário começa vazio.
-        let _ = run(cwd, &["read-tree", "HEAD"], &env, OUT_CAP).await;
-        run(cwd, &["add", "-A"], &env, OUT_CAP).await?;
-        Ok(run(cwd, &["write-tree"], &env, OUT_CAP).await?.trim().to_string())
+        // Parte do índice real (inclui o que o usuário já deixou staged); sem índice, começa vazio.
+        let _ = std::fs::copy(PathBuf::from(git_dir.trim()).join("index"), &index);
+        in_index(&root, &env, &["add", "-u"]).await?;
+        // Os não rastreados entram por caminho, sem os grandes (shortcut: ficam fora das mudanças do turno).
+        let listing = run(&root, &["ls-files", "-o", "--exclude-standard", "-z"], &[], 16 * OUT_CAP, TIMEOUT).await?;
+        let small: Vec<&str> = listing
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .filter(|p| std::fs::symlink_metadata(root.join(p)).is_ok_and(|m| m.len() <= SNAPSHOT_FILE_CAP))
+            .collect();
+        for chunk in small.chunks(200) {
+            let mut args = vec!["add", "--"];
+            args.extend(chunk);
+            in_index(&root, &env, &args).await?;
+        }
+        Ok(in_index(&root, &env, &["write-tree"]).await?.trim().to_string())
     }
     .await;
     let _ = std::fs::remove_file(&index);

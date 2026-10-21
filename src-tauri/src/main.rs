@@ -135,6 +135,13 @@ fn send_message(app: AppHandle, state: Shared<'_>, thread_id: String, prompt: St
         Some(m) => (m.parse::<AgentMode>().map_err(err)?, false),
     };
 
+    if thread.title.is_none() {
+        let title = rusi::chat::title_from(&prompt);
+        if !title.is_empty() {
+            let _ = state.db().rename_thread(&thread_id, &title);
+        }
+    }
+
     let cancel = Arc::new(Notify::new());
     {
         let mut running = state.running.guard();

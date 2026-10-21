@@ -22,6 +22,10 @@ fn repo() -> (tempfile::TempDir, std::path::PathBuf) {
     let path = dir.path().join("proj");
     std::fs::create_dir(&path).unwrap();
     sh(&path, &["init", "-q", "-b", "main"]);
+    // Identidade local: `git::commit` não passa `-c user.*` e a máquina de CI pode não ter uma.
+    sh(&path, &["config", "user.name", "t"]);
+    sh(&path, &["config", "user.email", "t@t"]);
+    sh(&path, &["config", "commit.gpgsign", "false"]);
     std::fs::write(path.join("a.txt"), "um\n").unwrap();
     sh(&path, &["add", "."]);
     sh(&path, &["commit", "-q", "-m", "inicial"]);
@@ -113,6 +117,7 @@ async fn test_turn_changes_do_not_touch_index_or_refs() {
         std::fs::write(repo.join("a.txt"), "um\ndois\n").unwrap();
         std::fs::write(repo.join("novo.txt"), "n\n").unwrap();
         std::fs::write(repo.join("ignorado"), "z\n").unwrap();
+        std::fs::write(repo.join("staged.txt"), "s\nmais\n").unwrap();
         std::fs::write(repo.join("bin.dat"), [0u8, 159, 146, 150, 0]).unwrap();
     })
     .await;
@@ -126,8 +131,9 @@ async fn test_turn_changes_do_not_touch_index_or_refs() {
     assert_eq!(find("novo.txt")["added"].as_u64(), Some(1));
     assert!(find("bin.dat")["added"].is_null());
     assert!(!files.iter().any(|f| f["path"] == "ignorado"));
-    // staged.txt e .gitignore já existiam antes do turno: o antes-e-depois não os lista.
-    assert!(!files.iter().any(|f| f["path"] == "staged.txt"));
+    // staged.txt já existia (só no índice) e mudou durante o turno; .gitignore não mudou.
+    assert_eq!(find("staged.txt")["added"].as_u64(), Some(1));
+    assert!(!files.iter().any(|f| f["path"] == ".gitignore"));
 
     let status = git::status(&repo).await.unwrap();
     assert!(status.iter().any(|f| f.path == "staged.txt" && f.index == 'A'), "índice do usuário intacto: {status:?}");
@@ -167,12 +173,30 @@ async fn test_big_patch_is_truncated() {
 #[tokio::test]
 async fn test_files_after_an_oversized_patch_are_marked_truncated() {
     let (_dir, repo) = repo();
+    // Rastreado: arquivos não rastreados grandes nem entram no snapshot.
+    std::fs::write(repo.join("a_grande.txt"), "x\n").unwrap();
+    sh(&repo, &["add", "."]);
+    sh(&repo, &["commit", "-q", "-m", "grande"]);
     let before = git::snapshot(&repo).await.unwrap();
-    // Passa de 2 MiB e vem primeiro na ordem alfabética; o patch de z.txt não cabe na saída.
+    // O patch passa de 2 MiB e vem primeiro na ordem alfabética; o de z.txt não cabe na saída.
     std::fs::write(repo.join("a_grande.txt"), "linha\n".repeat(400_000)).unwrap();
     std::fs::write(repo.join("z.txt"), "pequeno\n").unwrap();
     let after = git::snapshot(&repo).await.unwrap();
     let files = git::changes(&repo, &before, &after).await.unwrap();
     let z = files.iter().find(|f| f.path == "z.txt").unwrap();
     assert!(z.patch.is_empty() && z.truncated);
+}
+
+#[tokio::test]
+async fn test_snapshot_skips_big_untracked_files_and_finds_files_in_subdirs() {
+    let (_dir, repo) = repo();
+    let before = git::snapshot(&repo).await.unwrap();
+    std::fs::create_dir(repo.join("sub")).unwrap();
+    std::fs::write(repo.join("sub/pequeno.txt"), "ok\n").unwrap();
+    std::fs::write(repo.join("enorme.bin"), vec![b'x'; 2 * 1024 * 1024]).unwrap();
+    // Tirado de dentro da subpasta, o snapshot continua sendo do repositório inteiro.
+    let after = git::snapshot(&repo.join("sub")).await.unwrap();
+    let files = git::changes(&repo, &before, &after).await.unwrap();
+    let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["sub/pequeno.txt"]);
 }
