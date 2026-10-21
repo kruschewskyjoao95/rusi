@@ -48,7 +48,8 @@
             <option value="medium" selected>Esforço médio</option>
             <option value="high">Esforço alto</option>
           </select>
-          <input id="model" placeholder="modelo (padrão)" aria-label="Modelo" />
+          <input id="model" list="models" placeholder="modelo (padrão)" aria-label="Modelo" />
+          <datalist id="models"></datalist>
           <span class="spacer"></span>
           <button type="button" id="stop" hidden>Parar</button>
           <button type="submit" id="send">Enviar</button>

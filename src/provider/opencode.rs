@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 
-use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary};
+use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary, run_stdout};
 use super::opencode_session::OpenCodeSession;
 use super::snapshot::{AuthState, ProviderSnapshot};
 use super::ProviderDriver;
@@ -57,6 +57,13 @@ impl ProviderDriver for OpenCodeDriver {
             auth: AuthState::Unknown,
             message: Some("modelos gratuitos funcionam sem login; veja `opencode auth`".to_string()),
         }
+    }
+
+    async fn models(&self) -> Vec<String> {
+        let Some(binary) = self.find_binary() else { return Vec::new() };
+        // `--standalone`: sem ele o CLI tenta falar com o serviço em segundo plano, que pode não existir.
+        let out = run_stdout(&binary, &["models", "--standalone"]).await.unwrap_or_default();
+        out.lines().map(str::trim).filter(|l| l.contains('/')).map(String::from).collect()
     }
 
     async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {

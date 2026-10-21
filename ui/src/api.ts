@@ -10,6 +10,7 @@ type Listener<T> = (payload: T) => void;
 
 export interface Api {
   listProviders(): Promise<Provider[]>;
+  listProviderModels(provider: string): Promise<string[]>;
   listSessions(): Promise<Thread[]>;
   createSession(provider: string, cwd: string | null): Promise<Thread>;
   deleteSession(threadId: string): Promise<void>;
@@ -29,6 +30,7 @@ export interface Api {
 
 const real: Api = {
   listProviders: () => invoke("list_providers"),
+  listProviderModels: (provider) => invoke("list_provider_models", { provider }),
   listSessions: () => invoke("list_sessions"),
   createSession: (provider, cwd) => invoke("create_session", { provider, cwd, title: null }),
   deleteSession: (threadId) => invoke("delete_session", { threadId }),
@@ -60,6 +62,7 @@ function createMock(): Api {
       { id: "claude", display_name: "Claude Code", installed: true, auth: { state: "authenticated", account: "demo" } },
       { id: "codex", display_name: "Codex", installed: false, auth: { state: "unavailable" } },
     ],
+    listProviderModels: async () => ["opus", "sonnet", "haiku"],
     pickFolder: async () => window.prompt("Pasta do projeto"),
     listSessions: async () => [...threads],
     createSession: async (provider, cwd) => {

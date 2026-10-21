@@ -48,6 +48,11 @@ pub trait ProviderDriver: Send + Sync {
     /// Estado atual: instalado, versão e autenticação.
     async fn snapshot(&self) -> ProviderSnapshot;
 
+    /// Modelos que o provedor oferece; vazio quando não há como listar (ex: sem login).
+    async fn models(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Inicia uma sessão com o agente. Provedores sem suporte ainda devolvem `Unsupported`.
     async fn start_session(&self, _config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {
         Err(SessionError::Unsupported(self.id().to_string()))

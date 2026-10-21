@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use super::acp_session::{AcpOptions, AcpSession};
-use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary};
+use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary, run_stdout};
 use super::snapshot::{AuthState, ProviderSnapshot};
 use super::ProviderDriver;
 use crate::config::AgentMode;
@@ -65,6 +65,17 @@ pub fn parse_models_output(output: &str) -> AuthState {
     }
 }
 
+/// Os modelos de `grok models`: as linhas `- id` / `* id (default)` depois de "Available models:".
+pub fn parse_model_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .skip_while(|l| !l.contains("Available models"))
+        .skip(1)
+        .filter_map(|l| l.trim().strip_prefix(['-', '*']))
+        .filter_map(|l| l.split_whitespace().next().map(String::from))
+        .collect()
+}
+
 /// Argumentos de lançamento por modo. `--permission-mode` na linha de comando vence a
 /// configuração do usuário, então `accept-edits` não herda um "always approve" configurado.
 pub(super) fn spawn_args(config: &SessionConfig) -> Vec<String> {
@@ -111,6 +122,11 @@ impl ProviderDriver for GrokDriver {
         }
     }
 
+    async fn models(&self) -> Vec<String> {
+        let Some(binary) = self.find_binary() else { return Vec::new() };
+        run_stdout(&binary, &["models"]).await.map(|out| parse_model_list(&out)).unwrap_or_default()
+    }
+
     async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {
         let binary = self
             .find_binary()
@@ -142,6 +158,13 @@ mod tests {
         assert!(matches!(parse_models_output("You are logged in as x\nmodels"), AuthState::Authenticated { .. }));
         assert_eq!(parse_models_output("You are not authenticated.\n"), AuthState::Unauthenticated);
         assert_eq!(parse_models_output("???"), AuthState::Unknown);
+    }
+
+    #[test]
+    fn test_parse_model_list() {
+        let out = "You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  - grok-4.7\n  * grok-4.6 (default)\n";
+        assert_eq!(parse_model_list(out), ["grok-4.7", "grok-4.6"]);
+        assert!(parse_model_list("Not logged in").is_empty());
     }
 
     #[test]

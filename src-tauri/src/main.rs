@@ -92,6 +92,13 @@ async fn list_providers() -> Vec<ProviderSnapshot> {
     snapshot_all(&built_in_drivers()).await
 }
 
+/// Modelos que o provedor oferece (vazio se não der para listar).
+#[tauri::command]
+async fn list_provider_models(provider: String) -> CmdResult<Vec<String>> {
+    let driver = driver_by_id(&provider).ok_or_else(|| format!("provedor desconhecido: {provider}"))?;
+    Ok(driver.models().await)
+}
+
 #[tauri::command(async)]
 fn list_sessions(state: Shared<'_>) -> CmdResult<Vec<Thread>> {
     state.db().list_threads(200).map_err(err)
@@ -258,6 +265,7 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             list_providers,
+            list_provider_models,
             list_sessions,
             create_session,
             delete_session,

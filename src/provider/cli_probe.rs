@@ -7,6 +7,7 @@ use super::snapshot::{AuthState, ProviderSnapshot};
 use super::ProviderDriver;
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Procura um executável no `PATH` e em diretórios extras (ex: `~/.local/bin`).
 pub fn resolve_binary(names: &[&str], extra_dirs: &[PathBuf]) -> Option<PathBuf> {
@@ -40,6 +41,13 @@ pub(super) async fn probe_version(binary: &Path) -> Option<String> {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .map(str::to_string)
+}
+
+/// Executa `<binary> <args>` com timeout e devolve o stdout; `None` se falhar ou estourar o tempo.
+pub(super) async fn run_stdout(binary: &Path, args: &[&str]) -> Option<String> {
+    let run = Command::new(binary).args(args).kill_on_drop(true).output();
+    let output = tokio::time::timeout(MODELS_TIMEOUT, run).await.ok()?.ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 pub(super) fn default_extra_dirs() -> Vec<PathBuf> {

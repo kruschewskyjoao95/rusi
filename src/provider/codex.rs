@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 
-use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary};
+use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary, run_stdout};
 use super::codex_session::CodexSession;
 use super::snapshot::{AuthState, ProviderSnapshot};
 use super::ProviderDriver;
@@ -86,6 +86,20 @@ pub fn parse_account(response: &Value) -> AuthState {
     }
 }
 
+/// Interpreta `codex debug models`: só os modelos visíveis no seletor do próprio Codex.
+pub fn parse_models(raw: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"].as_str() == Some("list"))
+        .filter_map(|m| m["slug"].as_str().map(String::from))
+        .collect()
+}
+
 #[async_trait]
 impl ProviderDriver for CodexDriver {
     fn id(&self) -> &'static str {
@@ -117,6 +131,11 @@ impl ProviderDriver for CodexDriver {
         }
     }
 
+    async fn models(&self) -> Vec<String> {
+        let Some(binary) = self.find_binary() else { return Vec::new() };
+        run_stdout(&binary, &["debug", "models"]).await.map(|raw| parse_models(&raw)).unwrap_or_default()
+    }
+
     async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {
         let binary = self
             .find_binary()
@@ -131,6 +150,13 @@ impl ProviderDriver for CodexDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_models_keeps_only_listed() {
+        let raw = r#"{"models":[{"slug":"a","visibility":"list"},{"slug":"b","visibility":"hide"},{"slug":"c","visibility":"list"}]}"#;
+        assert_eq!(parse_models(raw), ["a", "c"]);
+        assert!(parse_models("não é json").is_empty());
+    }
 
     #[test]
     fn test_parse_account_variants() {

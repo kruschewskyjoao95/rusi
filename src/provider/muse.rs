@@ -32,8 +32,8 @@ impl MuseDriver {
         self.binary.clone().or_else(|| resolve_binary(&["muse"], &default_extra_dirs()))
     }
 
-    /// Quantos modelos o host lista (`model/list`); `None` se o host não respondeu.
-    async fn model_count(&self, binary: &PathBuf) -> Option<usize> {
+    /// Ids dos modelos que o host lista (`model/list`); `None` se o host não respondeu.
+    async fn model_ids(&self, binary: &PathBuf) -> Option<Vec<String>> {
         let probe = async {
             let mut cmd = Command::new(binary);
             cmd.args(["serve", "--no-session-log"]).env("MUSE_NO_AUTO_UPDATE", "1");
@@ -47,7 +47,8 @@ impl MuseDriver {
                 .ok()?;
                 peer.notify("initialized", None).await.ok()?;
                 let models = peer.request("model/list", json!({})).await.ok()?;
-                models["models"].as_array().map(Vec::len)
+                let models = models["models"].as_array()?;
+                Some(models.iter().filter_map(|m| m["modelId"].as_str().map(String::from)).collect())
             }
             .await;
             peer.close().await;
@@ -81,11 +82,11 @@ impl ProviderDriver for MuseDriver {
                 "`muse` não encontrado; instale o Muse Code e execute `muse login`",
             );
         };
-        let (version, models) = tokio::join!(probe_version(&binary), self.model_count(&binary));
+        let (version, models) = tokio::join!(probe_version(&binary), self.model_ids(&binary));
         // Como no T3, o `muse serve` não expõe o estado do login: só dá para saber se o
         // host responde e lista modelos. O erro de login aparece no primeiro turno.
         let message = match models {
-            Some(0) => Some("nenhum modelo listado; execute `muse login`".to_string()),
+            Some(ids) if ids.is_empty() => Some("nenhum modelo listado; execute `muse login`".to_string()),
             None => Some("o host do Muse não respondeu; verifique a instalação".to_string()),
             Some(_) => None,
         };
@@ -98,6 +99,11 @@ impl ProviderDriver for MuseDriver {
             auth: AuthState::Unknown,
             message,
         }
+    }
+
+    async fn models(&self) -> Vec<String> {
+        let Some(binary) = self.find_binary() else { return Vec::new() };
+        self.model_ids(&binary).await.unwrap_or_default()
     }
 
     async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {

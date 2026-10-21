@@ -91,6 +91,16 @@ async function select(thread: Thread) {
   await reload(thread.id);
   renderAll();
   void guard(refreshGit)();
+  void fillModels(thread.provider);
+}
+
+const modelCache = new Map<string, string[]>();
+
+/** Sugestões do campo de modelo; o campo continua aceitando texto livre. */
+async function fillModels(provider: string) {
+  if (!modelCache.has(provider)) modelCache.set(provider, await api.listProviderModels(provider).catch(() => []));
+  if (state.current?.provider !== provider) return;
+  $("models").replaceChildren(...modelCache.get(provider)!.map((m) => new Option(m)));
 }
 
 // ---------- conversa ----------

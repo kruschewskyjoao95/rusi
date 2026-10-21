@@ -103,6 +103,11 @@ impl ProviderDriver for ClaudeDriver {
         }
     }
 
+    /// O CLI não lista modelos; os apelidos valem para qualquer assinatura.
+    async fn models(&self) -> Vec<String> {
+        ["opus", "sonnet", "haiku"].map(String::from).to_vec()
+    }
+
     async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {
         let binary = self.find_binary().ok_or_else(|| {
             SessionError::NotReady("`claude` não encontrado; instale o Claude Code".into())
