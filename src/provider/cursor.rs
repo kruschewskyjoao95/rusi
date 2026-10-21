@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use super::cli_probe::{default_extra_dirs, probe_version, resolve_binary};
-use super::cursor_session;
+use super::cursor_session::CursorSession;
 use super::snapshot::{AuthState, ProviderSnapshot};
 use super::ProviderDriver;
 use crate::session::{AgentSession, SessionConfig, SessionError};
@@ -120,7 +120,7 @@ impl ProviderDriver for CursorDriver {
         if self.binary.is_none() && self.read_auth(&binary).await == AuthState::Unauthenticated {
             return Err(SessionError::NotReady("Cursor sem login: execute `cursor-agent login`".into()));
         }
-        Ok(Box::new(cursor_session::session(&binary, &config)))
+        Ok(Box::new(CursorSession::new(&binary, &config)))
     }
 }
 
