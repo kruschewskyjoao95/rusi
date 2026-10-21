@@ -357,7 +357,11 @@ async function init() {
     await send();
   });
   $("prompt").onkeydown = (ev) => {
-    if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) ($("composer") as HTMLFormElement).requestSubmit();
+    // Enter envia; Shift+Enter quebra a linha. `isComposing`: o Enter que confirma um IME não envia.
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+      ev.preventDefault();
+      ($("composer") as HTMLFormElement).requestSubmit();
+    }
   };
   $("stop").onclick = guard(async () => void (state.current && (await api.stopSession(state.current.id))));
   $("refresh").onclick = guard(refreshGit);
