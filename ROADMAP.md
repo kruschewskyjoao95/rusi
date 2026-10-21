@@ -22,7 +22,8 @@ Ver `PROJECT.md` para arquitetura e princípios.
 - [x] ACP (Grok/Antigravity): `session/request_permission` → evento.
 - [x] `run_turn` recebe um *approver*; o CLI pergunta no terminal (`[s]im / [N]ão`); sem terminal nega.
 - [x] Testes com agentes falsos por protocolo; Claude validado ao vivo.
-- [ ] Muse, OpenCode, Pi e Cursor ainda usam o aceitar/negar fixo do modo.
+- [x] Muse, Pi e OpenCode perguntam em `accept-edits` (o Pi por uma extensão que o Rusi carrega, `src/provider/pi_gate.ts`).
+- [ ] Cursor ainda usa o aceitar/negar fixo do modo (o `--print` do CLI não tem como perguntar no meio do turno).
 - [ ] Modo `plan` negando destrutivo de forma absoluta em todos os provedores.
 
 ## Fase 2 — Git, worktrees e mudanças por turno (núcleo e CLI feitos)

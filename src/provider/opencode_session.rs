@@ -13,7 +13,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::config::AgentMode;
-use crate::session::{AgentEvent, AgentSession, SessionConfig, SessionError, TokenUsage};
+use crate::session::{AgentEvent, AgentSession, ApprovalRequest, PendingApprovals, SessionConfig, SessionError, TokenUsage};
 use crate::tools::process::kill_process_group;
 
 const USERNAME: &str = "opencode";
@@ -37,6 +37,21 @@ pub(super) fn session_rules(config: &SessionConfig) -> Vec<Value> {
 
 pub(super) fn auto_accept(config: &SessionConfig) -> bool {
     config.dangerously_skip_permissions || config.mode == AgentMode::Auto
+}
+
+/// Em `accept-edits` as regras acima mandam perguntar; quem decide é o usuário.
+pub(super) fn ask_user(config: &SessionConfig) -> bool {
+    config.mode == AgentMode::AcceptEdits && !config.dangerously_skip_permissions
+}
+
+async fn reply_permission(http: &reqwest::Client, base: &str, password: &str, sid: &str, request_id: &str, approved: bool) {
+    let decision = if approved { "once" } else { "reject" };
+    let _ = http
+        .post(format!("{base}/api/session/{sid}/permission/{request_id}/reply"))
+        .basic_auth(USERNAME, Some(password))
+        .json(&json!({ "decision": decision }))
+        .send()
+        .await;
 }
 
 /// `provider/modelo#variante` → corpo `model` da API.
@@ -113,8 +128,8 @@ pub(super) struct Translator {
 #[derive(Debug, PartialEq)]
 pub(super) enum Action {
     Event(AgentEvent),
-    /// Responder a um pedido de permissão: (requestID, ação).
-    Permission { request_id: String, action: String },
+    /// Responder a um pedido de permissão: (requestID, ação, recursos pedidos).
+    Permission { request_id: String, action: String, resources: Value },
 }
 
 impl Translator {
@@ -180,7 +195,7 @@ impl Translator {
             }
             Some("permission.asked") => match (data["id"].as_str(), data["action"].as_str()) {
                 (Some(id), Some(action)) => {
-                    vec![Action::Permission { request_id: id.to_string(), action: action.to_string() }]
+                    vec![Action::Permission { request_id: id.to_string(), action: action.to_string(), resources: data["resources"].clone() }]
                 }
                 _ => Vec::new(),
             },
@@ -242,6 +257,7 @@ pub struct OpenCodeSession {
     session_id: String,
     child: Arc<AsyncMutex<Child>>,
     events: mpsc::UnboundedReceiver<AgentEvent>,
+    approvals: PendingApprovals,
 }
 
 fn random_password() -> String {
@@ -309,6 +325,7 @@ impl OpenCodeSession {
             session_id: String::new(),
             child,
             events: mpsc::unbounded_channel().1,
+            approvals: PendingApprovals::default(),
         };
         match session.open(config).await {
             Ok(()) => Ok(session),
@@ -406,6 +423,8 @@ impl OpenCodeSession {
         self.events = events;
 
         let accept = auto_accept(config);
+        let ask = ask_user(config);
+        let task_approvals = self.approvals.clone();
         let http = self.http.clone();
         let base = self.base.clone();
         let password = self.password.clone();
@@ -425,17 +444,23 @@ impl OpenCodeSession {
                                     return;
                                 }
                             }
-                            Action::Permission { request_id, action } => {
+                            Action::Permission { request_id, action, resources } => {
+                                if ask {
+                                    let (http, base, password, sid) = (http.clone(), base.clone(), password.clone(), sid.clone());
+                                    let id = request_id.clone();
+                                    task_approvals.register(request_id.clone(), move |approved| async move {
+                                        reply_permission(&http, &base, &password, &sid, &id, approved).await;
+                                    });
+                                    let request = ApprovalRequest { id: request_id, tool: action, input: resources };
+                                    if tx.send(AgentEvent::ApprovalRequested(request)).is_err() {
+                                        return;
+                                    }
+                                    continue;
+                                }
                                 if !accept {
                                     translator.note_denied(&action);
                                 }
-                                let decision = if accept { "once" } else { "reject" };
-                                let _ = http
-                                    .post(format!("{base}/api/session/{sid}/permission/{request_id}/reply"))
-                                    .basic_auth(USERNAME, Some(&password))
-                                    .json(&json!({ "decision": decision }))
-                                    .send()
-                                    .await;
+                                reply_permission(&http, &base, &password, &sid, &request_id, accept).await;
                             }
                         }
                     }
@@ -460,6 +485,10 @@ impl AgentSession for OpenCodeSession {
 
     async fn next_event(&mut self) -> Option<AgentEvent> {
         self.events.recv().await
+    }
+
+    async fn respond_approval(&mut self, id: &str, approved: bool) -> Result<(), SessionError> {
+        self.approvals.resolve(id, approved).await
     }
 
     async fn interrupt(&mut self) -> Result<(), SessionError> {
@@ -500,6 +529,8 @@ mod tests {
         let skip = session_rules(&cfg(AgentMode::Plan, true));
         assert_eq!(skip, vec![json!({"action": "*", "resource": "*", "effect": "allow"})]);
         assert!(auto_accept(&cfg(AgentMode::Auto, false)) && !auto_accept(&cfg(AgentMode::Plan, false)));
+        assert!(ask_user(&cfg(AgentMode::AcceptEdits, false)));
+        assert!(!ask_user(&cfg(AgentMode::Plan, false)) && !ask_user(&cfg(AgentMode::AcceptEdits, true)));
     }
 
     #[test]
@@ -584,6 +615,6 @@ mod tests {
         let failed_tool = t.handle(&json!({"type": "session.tool.failed", "data": {"sessionID": "s", "id": "c", "error": {"message": "boom"}}}));
         assert_eq!(failed_tool, vec![Action::Event(AgentEvent::ToolResult { id: "c".into(), output: "boom".into(), is_error: true })]);
         let ask = t.handle(&json!({"type": "permission.asked", "data": {"id": "perm_1", "sessionID": "s", "action": "shell", "resources": ["ls"]}}));
-        assert_eq!(ask, vec![Action::Permission { request_id: "perm_1".into(), action: "shell".into() }]);
+        assert_eq!(ask, vec![Action::Permission { request_id: "perm_1".into(), action: "shell".into(), resources: json!(["ls"]) }]);
     }
 }
