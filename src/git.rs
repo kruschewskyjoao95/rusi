@@ -248,8 +248,21 @@ async fn in_index(root: &Path, env: &[(&str, OsString)], args: &[&str]) -> Resul
     run(root, args, env, OUT_CAP, TIMEOUT).await
 }
 
+/// Apaga índices temporários que um snapshot interrompido (processo morto) deixou para trás.
+/// O limite de 1 h poupa o de outro processo ainda em andamento.
+fn sweep_stale_indexes(git_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(git_dir) else { return };
+    for entry in entries.flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > Duration::from_secs(3600)));
+        if old && entry.file_name().to_string_lossy().starts_with("rusi-index-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 pub async fn snapshot(cwd: &Path) -> Result<String, GitError> {
     let git_dir = git(cwd, &["rev-parse", "--absolute-git-dir"]).await?;
+    sweep_stale_indexes(Path::new(git_dir.trim()));
     let root = toplevel(cwd).await.ok_or_else(|| GitError::Other("não é um repositório git".into()))?;
     let index = PathBuf::from(git_dir.trim()).join(format!("rusi-index-{}", uuid::Uuid::new_v4()));
     let env = [("GIT_INDEX_FILE", index.clone().into_os_string())];

@@ -200,3 +200,17 @@ async fn test_snapshot_skips_big_untracked_files_and_finds_files_in_subdirs() {
     let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(paths, ["sub/pequeno.txt"]);
 }
+
+#[tokio::test]
+async fn test_snapshot_sweeps_only_stale_temporary_indexes() {
+    let (_dir, repo) = repo();
+    let old = repo.join(".git/rusi-index-velho");
+    let fresh = repo.join(".git/rusi-index-recente");
+    for f in [&old, &fresh] {
+        std::fs::write(f, "x").unwrap();
+    }
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    std::fs::File::options().write(true).open(&old).unwrap().set_modified(two_hours_ago).unwrap();
+    git::snapshot(&repo).await.unwrap();
+    assert!(!old.exists() && fresh.exists());
+}
