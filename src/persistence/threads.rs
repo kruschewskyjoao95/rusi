@@ -13,6 +13,9 @@ pub struct Thread {
     pub pinned: bool,
     /// Id da conversa dentro do provedor (ex: sessão do `claude`), usado para retomar.
     pub provider_session_id: Option<String>,
+    /// Checkout isolado da tarefa (o `cwd` aponta para ele) e sua branch; nulos = checkout principal.
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -33,7 +36,7 @@ pub struct ThreadEvent {
     pub created_at: i64,
 }
 
-const THREAD_COLUMNS: &str = "id, provider, model, title, cwd, pinned, created_at, updated_at, provider_session_id";
+const THREAD_COLUMNS: &str = "id, provider, model, title, cwd, pinned, created_at, updated_at, provider_session_id, worktree_path, branch";
 
 fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<Thread> {
     Ok(Thread {
@@ -46,6 +49,8 @@ fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<Thread> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         provider_session_id: row.get(8)?,
+        worktree_path: row.get(9)?,
+        branch: row.get(10)?,
     })
 }
 
@@ -92,6 +97,18 @@ impl Database {
                 thread_from_row,
             )
             .optional()?)
+    }
+
+    /// Aponta a tarefa para um worktree: ele vira também o `cwd` da thread.
+    pub fn set_thread_worktree(&self, id: &str, path: &str, branch: &str) -> Result<(), DbError> {
+        let changed = self.conn().execute(
+            "UPDATE threads SET worktree_path = ?2, branch = ?3, cwd = ?2 WHERE id = ?1",
+            params![id, path, branch],
+        )?;
+        if changed == 0 {
+            return Err(DbError::ThreadNotFound(id.to_string()));
+        }
+        Ok(())
     }
 
     pub fn set_thread_pinned(&self, id: &str, pinned: bool) -> Result<(), DbError> {
@@ -162,12 +179,27 @@ impl Database {
 
     /// Eventos de uma thread em ordem, a partir de `after_seq` (exclusivo).
     pub fn thread_events(&self, thread_id: &str, after_seq: i64) -> Result<Vec<ThreadEvent>, DbError> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
+        self.query_events(
             "SELECT seq, kind, payload, created_at FROM thread_events
              WHERE thread_id = ?1 AND seq > ?2 ORDER BY seq",
-        )?;
-        let rows = stmt.query_map(params![thread_id, after_seq], |row| {
+            params![thread_id, after_seq],
+        )
+    }
+
+    /// Os últimos `limit` eventos de uma thread, em ordem.
+    pub fn recent_thread_events(&self, thread_id: &str, limit: u32) -> Result<Vec<ThreadEvent>, DbError> {
+        self.query_events(
+            "SELECT seq, kind, payload, created_at FROM
+               (SELECT seq, kind, payload, created_at FROM thread_events WHERE thread_id = ?1 ORDER BY seq DESC LIMIT ?2)
+             ORDER BY seq",
+            params![thread_id, limit],
+        )
+    }
+
+    fn query_events(&self, sql: &str, args: impl rusqlite::Params) -> Result<Vec<ThreadEvent>, DbError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(args, |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
         })?;
         rows.map(|r| {
@@ -213,7 +245,11 @@ mod tests {
 
         let all = db.thread_events(&t.id, 0).unwrap();
         assert_eq!(all, vec![e1, e2.clone()]);
-        assert_eq!(db.thread_events(&t.id, 1).unwrap(), vec![e2]);
+        assert_eq!(db.thread_events(&t.id, 1).unwrap(), vec![e2.clone()]);
+
+        let e3 = db.append_event(&t.id, "user", &json!({"text": "de novo"})).unwrap();
+        assert_eq!(db.recent_thread_events(&t.id, 2).unwrap(), vec![e2, e3]);
+        assert_eq!(db.recent_thread_events(&t.id, 99).unwrap().len(), 3);
     }
 
     #[test]

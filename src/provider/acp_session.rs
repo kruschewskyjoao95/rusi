@@ -10,7 +10,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::rpc::{Incoming, RpcError, RpcPeer};
-use crate::session::{AgentEvent, AgentSession, SessionConfig, SessionError, TokenUsage};
+use crate::session::{AgentEvent, AgentSession, ApprovalRequest, PendingApprovals, SessionConfig, SessionError, TokenUsage};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_DONE: &str = "$/promptDone";
@@ -39,6 +39,18 @@ pub(super) struct AcpOptions {
     pub prefer_resume: bool,
     /// Modo de sessão a aplicar com `session/set_mode` (ex: `yolo`), se o agente o anunciar.
     pub session_mode: Option<&'static str>,
+}
+
+fn permission_tool(params: &Value) -> String {
+    params["toolCall"]["title"].as_str().or(params["toolCall"]["kind"].as_str()).unwrap_or("tool").to_string()
+}
+
+/// Resposta a um `session/request_permission`.
+fn permission_reply(params: &Value, accepted: bool) -> Value {
+    match pick_permission_option(params, accepted) {
+        Some(option_id) => json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
+        None => json!({ "outcome": { "outcome": "cancelled" } }),
+    }
 }
 
 /// Escolhe a opção de um `session/request_permission`. Devolve o `optionId`, ou `None`
@@ -171,6 +183,7 @@ pub struct AcpSession {
     peer: Arc<RpcPeer>,
     session_id: String,
     events: mpsc::UnboundedReceiver<AgentEvent>,
+    approvals: PendingApprovals,
 }
 
 fn rpc_to_session(err: RpcError) -> SessionError {
@@ -246,6 +259,10 @@ impl AcpSession {
 
         let task_peer = peer.clone();
         let auto_accept = options.auto_accept;
+        // O modo plan do agente nega por conta própria; fora dele e sem auto-aceite, o usuário decide.
+        let interactive = !auto_accept && !options.plan_mode;
+        let approvals = PendingApprovals::default();
+        let task_approvals = approvals.clone();
         tokio::spawn(async move {
             let mut translator = Translator::default();
             while let Some(message) = incoming.recv().await {
@@ -258,18 +275,24 @@ impl AcpSession {
                         }
                     }
                     Incoming::Request { id, method, params } if method == "session/request_permission" => {
-                        let reply = match pick_permission_option(&params, auto_accept) {
-                            Some(option_id) => json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
-                            None => json!({ "outcome": { "outcome": "cancelled" } }),
-                        };
-                        if !auto_accept {
-                            let tool = params["toolCall"]["title"]
-                                .as_str()
-                                .or(params["toolCall"]["kind"].as_str())
-                                .unwrap_or("tool");
-                            translator.note_denied(tool);
+                        let tool = permission_tool(&params);
+                        if interactive {
+                            let key = id.to_string();
+                            let peer = task_peer.clone();
+                            let reply_params = params.clone();
+                            task_approvals.register(key.clone(), move |approved| async move {
+                                let _ = peer.respond(id, permission_reply(&reply_params, approved)).await;
+                            });
+                            let request = ApprovalRequest { id: key, tool, input: params["toolCall"].clone() };
+                            if tx.send(AgentEvent::ApprovalRequested(request)).is_err() {
+                                return;
+                            }
+                            continue;
                         }
-                        let _ = task_peer.respond(id, reply).await;
+                        if !auto_accept {
+                            translator.note_denied(&tool);
+                        }
+                        let _ = task_peer.respond(id, permission_reply(&params, auto_accept)).await;
                     }
                     Incoming::Request { id, .. } => {
                         // fs/* e terminal/* não são oferecidos (capabilities vazias).
@@ -285,7 +308,7 @@ impl AcpSession {
             }
         });
 
-        Ok(Self { peer, session_id, events })
+        Ok(Self { peer, session_id, events, approvals })
     }
 
     /// `initialize` → (login se exigido) → `session/new|load|resume` → modo/modelo.
@@ -375,6 +398,10 @@ impl AgentSession for AcpSession {
 
     async fn next_event(&mut self) -> Option<AgentEvent> {
         self.events.recv().await
+    }
+
+    async fn respond_approval(&mut self, id: &str, approved: bool) -> Result<(), SessionError> {
+        self.approvals.resolve(id, approved).await
     }
 
     async fn interrupt(&mut self) -> Result<(), SessionError> {

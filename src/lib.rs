@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod cli;
 pub mod config;
+pub mod git;
 pub mod persistence;
 pub mod provider;
 pub mod rpc;

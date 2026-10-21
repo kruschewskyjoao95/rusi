@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -13,14 +13,14 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
 use crate::config::{AgentMode, EffortLevel};
-use crate::session::{AgentEvent, AgentSession, SessionConfig, SessionError, TokenUsage};
+use crate::session::{AgentEvent, AgentSession, ApprovalRequest, SessionConfig, SessionError, TokenUsage};
 use crate::tools::process::kill_process_group;
 
 const STDERR_TAIL_LINES: usize = 20;
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
-/// Argumentos do `claude` para uma sessão. Permissões que exigiriam aprovação são
-/// negadas automaticamente (`--permission-prompts none`) até existir o portão de permissões.
+/// Argumentos do `claude` para uma sessão. Pedidos de permissão chegam ao Rusi como
+/// `control_request` (`--permission-prompt-tool stdio`) e são respondidos por `respond_approval`.
 pub(super) fn build_args(config: &SessionConfig) -> Vec<String> {
     let mut args: Vec<String> = [
         "--print",
@@ -31,7 +31,9 @@ pub(super) fn build_args(config: &SessionConfig) -> Vec<String> {
         "--verbose",
         "--include-partial-messages",
         "--permission-prompts",
-        "none",
+        "host",
+        "--permission-prompt-tool",
+        "stdio",
     ]
     .map(String::from)
     .to_vec();
@@ -128,6 +130,19 @@ pub(super) fn parse_line(line: &str) -> Vec<AgentEvent> {
             })
             .collect(),
 
+        Some("control_request") if v["request"]["subtype"] == "can_use_tool" => v["request_id"]
+            .as_str()
+            .zip(v["request"]["tool_name"].as_str())
+            .map(|(id, tool)| {
+                AgentEvent::ApprovalRequested(ApprovalRequest {
+                    id: id.to_string(),
+                    tool: tool.to_string(),
+                    input: v["request"]["input"].clone(),
+                })
+            })
+            .into_iter()
+            .collect(),
+
         Some("result") => vec![AgentEvent::TurnComplete {
             text: v["result"].as_str().map(str::to_string),
             is_error: v["is_error"].as_bool().unwrap_or(false) || v["subtype"].as_str().is_some_and(|s| s != "success"),
@@ -171,11 +186,26 @@ fn parse_usage(usage: &Value) -> Option<TokenUsage> {
     })
 }
 
+/// Resposta a um `can_use_tool`: `allow` devolve o input (o agente pode usá-lo editado).
+fn approval_response(request_id: &str, approved: bool, input: Value) -> Value {
+    let decision = if approved {
+        json!({ "behavior": "allow", "updatedInput": input })
+    } else {
+        json!({ "behavior": "deny", "message": "Negado pelo usuário no Rusi" })
+    };
+    json!({
+        "type": "control_response",
+        "response": { "subtype": "success", "request_id": request_id, "response": decision },
+    })
+}
+
 pub struct ClaudeSession {
     child: Child,
     stdin: Option<ChildStdin>,
     events: mpsc::UnboundedReceiver<AgentEvent>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    /// Input de cada pedido aberto: aprovar exige devolvê-lo em `updatedInput`.
+    pending_approvals: HashMap<String, Value>,
 }
 
 impl ClaudeSession {
@@ -222,7 +252,7 @@ impl ClaudeSession {
             }
         });
 
-        Ok(Self { child, stdin, events, stderr_tail })
+        Ok(Self { child, stdin, events, stderr_tail, pending_approvals: HashMap::new() })
     }
 
     fn stderr_summary(&self) -> Option<String> {
@@ -257,7 +287,12 @@ impl AgentSession for ClaudeSession {
 
     async fn next_event(&mut self) -> Option<AgentEvent> {
         match self.events.recv().await {
-            Some(event) => Some(event),
+            Some(event) => {
+                if let AgentEvent::ApprovalRequested(request) = &event {
+                    self.pending_approvals.insert(request.id.clone(), request.input.clone());
+                }
+                Some(event)
+            }
             None => {
                 // stdout fechou: o processo terminou sem fechar o turno.
                 let status = self.child.wait().await.ok();
@@ -271,6 +306,11 @@ impl AgentSession for ClaudeSession {
                 .inspect(|_| self.stdin = None)
             }
         }
+    }
+
+    async fn respond_approval(&mut self, id: &str, approved: bool) -> Result<(), SessionError> {
+        let input = self.pending_approvals.remove(id).unwrap_or(Value::Null);
+        self.write_line(approval_response(id, approved, input)).await
     }
 
     async fn interrupt(&mut self) -> Result<(), SessionError> {

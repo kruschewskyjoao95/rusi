@@ -1,0 +1,16 @@
+[package]
+name = "rusi-app"
+version = "0.1.0"
+edition = "2024"
+description = "Rusi - Tauri 2: janela desktop para o núcleo rusi"
+authors = ["Joao"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rusi = { path = ".." }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rusi</title>
+  <script>
+    // Tema aplicado antes de montar a UI, para não piscar.
+    try { const t = localStorage.getItem("rusi-theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+  </script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header><strong>Rusi</strong><button id="theme" title="Alternar tema" aria-label="Alternar tema">◐</button></header>
+      <form id="new-session">
+        <select id="new-provider" aria-label="Provedor"></select>
+        <input id="new-cwd" placeholder="Pasta do projeto" aria-label="Pasta do projeto" />
+        <button type="submit">Nova tarefa</button>
+      </form>
+      <nav id="sessions" aria-label="Tarefas"></nav>
+    </aside>
+    <main id="main">
+      <div id="context-bar"></div>
+      <section id="thread" aria-live="polite"></section>
+      <div id="approvals"></div>
+      <form id="composer">
+        <textarea id="prompt" rows="3" placeholder="Peça algo ao agente… (Ctrl+Enter envia)" aria-label="Mensagem"></textarea>
+        <div class="row">
+          <select id="mode" aria-label="Modo de aprovação">
+            <option value="accept-edits">Aceitar edições</option>
+            <option value="auto">Auto</option>
+            <option value="plan">Plano (só leitura)</option>
+            <option value="full">Completo (sem permissões)</option>
+          </select>
+          <span class="spacer"></span>
+          <button type="button" id="stop" hidden>Parar</button>
+          <button type="submit" id="send">Enviar</button>
+        </div>
+      </form>
+    </main>
+    <aside id="inspector">
+      <header><strong>Mudanças</strong><button id="refresh" title="Atualizar">↻</button></header>
+      <div id="git"></div>
+    </aside>
+  </div>
+  <div id="toast" role="status"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

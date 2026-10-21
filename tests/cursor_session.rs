@@ -47,7 +47,7 @@ async fn test_two_turns_share_the_chat_through_resume() {
     let mut session = driver.start_session(SessionConfig { mode: AgentMode::Auto, ..Default::default() }).await.unwrap();
 
     let mut seen = Vec::new();
-    let first = run_turn(session.as_mut(), &db, &thread_id, "um", std::future::pending(), |e| seen.push(e.clone()))
+    let first = run_turn(session.as_mut(), &db, &thread_id, "um", std::future::pending(), rusi::session::deny_all, |e| seen.push(e.clone()))
         .await
         .unwrap();
     assert_eq!(first.text, "resumo=nenhum");
@@ -57,7 +57,7 @@ async fn test_two_turns_share_the_chat_through_resume() {
     let deltas: String = seen.iter().filter_map(|e| if let AgentEvent::TextDelta(t) = e { Some(t.as_str()) } else { None }).collect();
     assert_eq!(deltas, "resumo=nenhum");
 
-    let second = run_turn(session.as_mut(), &db, &thread_id, "dois", std::future::pending(), |_| {})
+    let second = run_turn(session.as_mut(), &db, &thread_id, "dois", std::future::pending(), rusi::session::deny_all, |_| {})
         .await
         .unwrap();
     assert_eq!(second.text, "resumo=chat-1", "o segundo turno usa --resume com o chat do primeiro");
@@ -72,7 +72,7 @@ async fn test_resume_from_previous_run() {
         .start_session(SessionConfig { resume: Some("chat-antigo".into()), ..Default::default() })
         .await
         .unwrap();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), |_| {}).await.unwrap();
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), rusi::session::deny_all, |_| {}).await.unwrap();
     session.close().await;
     assert_eq!(summary.text, "resumo=chat-antigo");
 }
@@ -83,11 +83,11 @@ async fn test_interrupt_kills_the_turn_and_next_turn_works() {
     let mut session = driver.start_session(SessionConfig::default()).await.unwrap();
     let cancel = tokio::time::sleep(Duration::from_millis(500));
     let started = std::time::Instant::now();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, |_| {}).await.unwrap();
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, rusi::session::deny_all, |_| {}).await.unwrap();
     assert!(summary.interrupted && summary.is_error);
     assert!(started.elapsed() < Duration::from_secs(10), "o processo foi derrubado, não esperou o sleep");
 
-    let next = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), |_| {}).await.unwrap();
+    let next = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), rusi::session::deny_all, |_| {}).await.unwrap();
     assert_eq!(next.text, "resumo=chat-1");
     session.close().await;
 }
@@ -96,7 +96,7 @@ async fn test_interrupt_kills_the_turn_and_next_turn_works() {
 async fn test_process_failure_surfaces_stderr() {
     let (_dir, driver, db, thread_id) = setup();
     let mut session = driver.start_session(SessionConfig::default()).await.unwrap();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "die", std::future::pending(), |_| {}).await.unwrap();
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "die", std::future::pending(), rusi::session::deny_all, |_| {}).await.unwrap();
     session.close().await;
     assert!(summary.is_error);
     assert!(summary.text.contains("falha simulada"), "got: {}", summary.text);

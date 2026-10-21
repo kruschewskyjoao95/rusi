@@ -1,83 +1,81 @@
-# Rusi — Host de Agentes de Código em Rust 🦀
+# Rusi - Tauri 2 — Roadmap
 
-Rusi **não tem modelo nem loop de agente próprios**. Ele hospeda os agentes que o
-usuário já assina (Claude, ChatGPT/Codex, Google/Antigravity, Cursor, Muse…), reutilizando
-o login de cada um — o mesmo modelo "traga sua assinatura" do T3-Code
-(ver `t3-code-reverse-engineering.md`).
+Ordem pensada para que cada fase seja usável sozinha pelo CLI e depois reaproveitada pela UI.
+Ver `PROJECT.md` para arquitetura e princípios.
 
-## Arquitetura
+## Fase 0 — Base (feito)
 
-```
-Cliente (CLI/TUI; depois web) ──► rusi (Rust, tokio)
-                                   ├─ ProviderDriver por provedor
-                                   │    snapshot (instalado / versão / auth)
-                                   │    sessão (start / send / interrupt / stream)
-                                   │    instalação gerenciada + checksum
-                                   │    sonda de uso e limites
-                                   ├─ Cliente ACP (JSON-RPC stdio) + ponte MCP
-                                   ├─ Cofre de segredos (keyring do SO)
-                                   ├─ Persistência (SQLite + migrations)
-                                   └─ Terminal PTY, git, checkpoints
-                                          │ spawn
-                      claude · codex · agy_acp_server · cursor-agent · muse · …
-```
+- [x] CLI (`clap`), config TOML, `ProviderDriver` + `ProviderSnapshot`, detecção de CLIs e auth.
+- [x] SQLite com migrations, threads/eventos, `--continue`; keyring (`rusi secrets`).
+- [x] `AgentSession`/`AgentEvent` neutros + `run_turn` com persistência e retomada.
+- [x] Drivers com sessão: Claude (stream-json), Codex (app-server), Muse (MSP), Pi (RPC),
+      Grok e Antigravity (ACP), Cursor, OpenCode.
+- [x] Instalação gerenciada do Antigravity.
+- [ ] Login do Antigravity (`rusi antigravity login` hoje recusa): enviar `authenticate` ao `agy_acp_server`, usar o redirect dele e verificar o hash do download.
 
-## Princípios
+## Fase 1 — Aprovações e modos (Claude, Codex e ACP feitos)
 
-- O login é sempre o do CLI oficial; o Rusi lê estado, nunca expõe tokens.
-- Spawnar o CLI oficial é o caminho padrão. Ler tokens para endpoints de uso é opcional
-  (endpoints não documentados podem quebrar ou violar termos).
-- `Plan` bloqueia ações destrutivas de forma absoluta; aprovações vêm dos pedidos ACP dos agentes.
+- [x] `AgentEvent::ApprovalRequested(ApprovalRequest { id, tool, input })` e
+      `AgentSession::respond_approval(id, approved)` (padrão: `NotReady`).
+- [x] Claude: `control_request` `can_use_tool` (`--permission-prompts host --permission-prompt-tool stdio`).
+- [x] Codex: `item/*/requestApproval` repassado ao usuário em `accept-edits`.
+- [x] ACP (Grok/Antigravity): `session/request_permission` → evento.
+- [x] `run_turn` recebe um *approver*; o CLI pergunta no terminal (`[s]im / [N]ão`); sem terminal nega.
+- [x] Testes com agentes falsos por protocolo; Claude validado ao vivo.
+- [ ] Muse, OpenCode, Pi e Cursor ainda usam o aceitar/negar fixo do modo.
+- [ ] Modo `plan` negando destrutivo de forma absoluta em todos os provedores.
 
-## Fases
+## Fase 2 — Git, worktrees e mudanças por turno (núcleo e CLI feitos)
 
-- [x] **0. Base** — CLI (`clap`), config TOML, trait `ProviderDriver`, `ProviderSnapshot`,
-      detecção de CLIs, auth do Claude via `.credentials.json`, `rusi providers`.
-- [x] **1. Persistência e segredos**
-  - SQLite (`src/persistence`): migrations versionadas por `PRAGMA user_version` (rejeita banco
-    mais novo), WAL, FK, arquivo 0600 em `~/.local/share/rusi/rusi.db` (`RUSI_DB_PATH`).
-    Threads com eventos sequenciais, fixar, renomear, apagar em cascata, `--continue`.
-  - Segredos (`src/secrets`): trait `SecretStore`, keyring do SO (Secret Service) e store em memória.
-    `rusi secrets set|status|delete` (valor só por stdin, nunca exibido).
-  - `rusi threads list|pin|unpin|delete`.
-- [x] **2. Claude** — sessão persistente via `claude --print --input-format stream-json
-      --output-format stream-json` (um processo por conversa, vários turnos).
-  - `src/session`: `AgentSession`/`AgentEvent` neutros de provedor + `run_turn`, que grava o
-    histórico na thread e guarda o id de sessão do provedor (migration 004) para `--resume`.
-  - Streaming de texto, raciocínio, ferramentas e resultados; tokens e custo por turno.
-  - Interrupção (Ctrl-C → `control_request: interrupt`) mantém a sessão aberta; `close` faz EOF e,
-    se preciso, derruba o grupo de processos.
-  - Permissões: `--permission-prompts none` — o que exigiria aprovação é negado e reportado
-    até a fase 6. Modo `plan`/`accept-edits`/`auto` e `--dangerously-skip-permissions` mapeados.
-  - `rusi "prompt"`, `rusi -p "prompt"`, `rusi -c`, e REPL sem prompt.
-- [x] **3. Um driver nativo por provedor, como no T3** (nada de "ACP genérico": o T3 só usa
-      ACP no Antigravity e no Grok; cada um dos outros fala o protocolo do próprio CLI).
-  - Codex: `codex app-server` (JSON-RPC sem campo `jsonrpc`), `thread/start|resume`, `turn/start|interrupt`,
-    aprovações do servidor; login lido por `account/read`.
-  - Muse: `muse serve` (MSP, JSON-RPC 2.0, UUIDv7), `session/start|resume`, `approval/requested` +
-    `approval/decide`.
-  - Pi: `pi --mode rpc` (JSONL), turno termina em `agent_settled`; sem aprovações no Pi, então
-    `plan`/`accept-edits` limitam as ferramentas a leitura. Login por `pi auth check`.
-  - Grok: `grok agent stdio` (ACP), modos por `--permission-mode`/`--always-approve`.
-  - Antigravity: `agy_acp_server` (ACP) com perfil privado (`GEMINI_HOME`), `authenticate`
-    `oauth-personal`, `session/resume`, modos `default`/`yolo`. Falta instalar o binário e logar (fase 4).
-  - OpenCode: `opencode serve` (v2) com senha gerada, REST `/api/session/*` + SSE `/api/event`.
-  - Cursor: `cursor-agent -p --output-format stream-json`, um processo por turno (`--resume`).
-    O T3 usa o `@cursor/sdk`, que não tem equivalente em Rust.
-  - Infra: `src/rpc` (par JSON-RPC em stdio) e `inject` para ordenar o fim de pedidos ACP.
-- [ ] **4. Instalação gerenciada e login OAuth loopback**
-  - Antigravity: `agy-acp-server` de `dl.google.com`, redirect `127.0.0.1`, `state` de uso
-    único (5 min), `iss` = `https://accounts.google.com`.
-  - Codex: release `openai/codex` com SHA-256 fixado, OIDC `auth.openai.com`,
-    callback `/auth/callback`.
-- [ ] **5. Uso e limites** por provedor.
-- [ ] **6. Portão de permissões** — responde aos pedidos de aprovação dos agentes (modos
-      `plan` / `accept-edits` / `auto`).
-- [ ] **7. Terminal PTY, git, checkpoints, review de diffs.**
-- [ ] **8. TUI, depois API para cliente web.**
+- [x] Módulo `git`: `status`, `diff`, `stage/unstage`, `commit`, `branches` — sempre argv, stdin nulo,
+      timeout de 30 s, saída limitada, sem `--force`.
+- [x] Worktrees: `create_worktree`, `worktree_status` (sujo / à frente), `remove_worktree` (sem `--force`),
+      `recreate_worktree`; pasta `<projeto>-worktrees/<branch>`, branch validada.
+- [x] Migration 005 (`threads.worktree_path`, `branch`); `attach_worktree` também move o `cwd` da thread,
+      então agente, fs e git resolvem o checkout da tarefa.
+- [x] Mudanças por turno via fotos de árvore com índice temporário (não toca índice nem refs do usuário);
+      evento `changes` com +/- e patch (256 KiB/arquivo, 200 arquivos, 2 MiB/turno).
+- [x] CLI: `rusi worktree new|list|rm`, `rusi git status|diff`, `rusi changes <sessão>`.
+- [ ] Teto de 1 MiB por arquivo *antes* do diff (hoje só o patch é cortado).
+- [ ] Estado "mesclado" do worktree e `attach` de branch existente.
 
-## Código herdado
+## Fase 3 — Shell Tauri 2 (primeira versão feita)
 
-`src/tools/{fs,process}.rs` (leitura/escrita/edição e `bash_run` com kill de grupo) deixam de
-ser ferramentas de agente; servem de base para terminal e checkpoints. O conector Gemini e o
-design de loop ReAct foram removidos (histórico no git).
+- [x] Workspace Cargo: `src-tauri/` (`rusi-app`) depende da lib `rusi`; `ui/` com Vite + TypeScript puro.
+- [x] Comandos IPC: `list_providers`, `list_sessions`, `create_session`, `delete_session`, `get_messages`,
+      `send_message`, `stop_session`, `respond_approval`, `git_status`, `git_diff`, `create_worktree`;
+      eventos `agent-event`, `turn-finished`, `sessions-changed`; erros como `string`.
+- [x] UI: tarefas (Ativas/Inativas), conversa em streaming com ferramentas recolhidas, barra de
+      aprovações, composer com modo (aceitar edições / auto / plano / completo) e parar, inspetor de
+      mudanças (status + diff), tema claro/escuro por tokens (`prefers-color-scheme`, contraste e
+      movimento reduzidos), Markdown mínimo escapado, mock de preview fora do Tauri.
+- [x] Testes: `npm test` (escape/Markdown), fluxo de aprovação verificado no mock via Chromium headless.
+- [ ] Seletor de modelo/esforço e de provedor por tarefa; título automático; botão de worktree na UI.
+- [ ] Diff por turno (evento `changes`) abrindo o patch; árvore de Arquivos; barra de contexto editável.
+- [ ] Testes Playwright no CI; empacotamento AppImage/deb (`cargo tauri build`) e CI; macOS/Windows depois.
+
+Rodar: `cd ui && npm install`, depois `cargo install tauri-cli --version '^2'` e `cargo tauri dev`
+(ou, sem o CLI, `npm run dev` em `ui/` e `cargo run -p rusi-app`).
+
+## Fase 4 — Fluxo de trabalho
+
+- [ ] Quadro de tarefas (Pending → In progress → Review → Completed), arquivamento após 7 dias.
+- [ ] Fila durável de mensagens e *steering* (Claude por stream input, Codex `turn/steer`).
+- [ ] Terminal PTY sob demanda; busca na thread (Ctrl+F); anexos (imagens, arquivos, pastas).
+- [ ] Troca de provedor no meio da conversa com handoff de histórico limitado (200 msgs / 64 KiB).
+- [ ] Fork de conversa a partir de uma mensagem.
+
+## Fase 5 — Times e observabilidade
+
+- [ ] Arquiteto + até 3 workers misturando provedores/modelos, via ferramentas MCP do host.
+- [ ] Uso e limites por provedor (opcional, sem ler tokens por padrão); status "limitado" e retomada no reset.
+- [ ] Atualização de CLIs com um clique; diagnóstico de instalação.
+
+## Depois / opcional
+
+GitHub (PRs e issues via `gh`), navegador embutido, bots (Telegram/Slack/Discord), VMs e sandboxes
+em nuvem, simuladores iOS/Android, tarefas agendadas, economia de tokens.
+
+## Fora de escopo
+
+Servidor multi-cliente, app mobile, modelo ou loop de agente próprios, telemetria.

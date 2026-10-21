@@ -2,14 +2,14 @@
 //! e faz o streaming dos turnos para a tela.
 
 use colored::Colorize;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::cli::open_database;
 use crate::config::Config;
 use crate::persistence::{Database, NewThread, Thread};
 use crate::provider::driver_by_id;
-use crate::session::{AgentEvent, AgentSession, SessionConfig, TurnSummary, run_turn};
+use crate::session::{AgentEvent, AgentSession, ApprovalRequest, SessionConfig, TurnSummary, run_turn};
 
 pub struct ChatOptions {
     pub prompt: Option<String>,
@@ -28,7 +28,7 @@ pub async fn run(config: &Config, options: ChatOptions) -> Result<(), BoxError> 
 
     let mut session = driver
         .start_session(SessionConfig {
-            cwd: std::env::current_dir().ok(),
+            cwd: thread_cwd(&thread),
             model: config.default_model.clone().or(thread.model.clone()),
             effort: config.default_effort,
             mode: config.default_mode,
@@ -40,6 +40,11 @@ pub async fn run(config: &Config, options: ChatOptions) -> Result<(), BoxError> 
     let outcome = drive(session.as_mut(), &db, &thread, &options).await;
     session.close().await;
     outcome
+}
+
+/// Checkout da tarefa (worktree, se houver); senão a pasta atual.
+fn thread_cwd(thread: &Thread) -> Option<std::path::PathBuf> {
+    thread.cwd.as_deref().map(Into::into).or_else(|| std::env::current_dir().ok())
 }
 
 fn open_thread(db: &Database, config: &Config, options: &ChatOptions) -> Result<Thread, BoxError> {
@@ -118,12 +123,21 @@ async fn turn(
         let _ = tokio::signal::ctrl_c().await;
         eprintln!("\n{}", "Interrompendo…".yellow());
     };
-    let summary = run_turn(session, db, &thread.id, prompt, cancel, |event| {
-        if print_only {
-            return;
-        }
-        render(event);
-    })
+    // Sem terminal (pipe, -p) não há quem responda: o pedido é negado.
+    let interactive = !print_only && io::stdin().is_terminal();
+    let approve = async |request: &ApprovalRequest| interactive && ask_user(request).await;
+    let cwd = thread_cwd(thread);
+    let summary = crate::git::track_changes(
+        db,
+        &thread.id,
+        cwd.as_deref(),
+        run_turn(session, db, &thread.id, prompt, cancel, approve, |event| {
+            if print_only {
+                return;
+            }
+            render(event);
+        }),
+    )
     .await?;
 
     let failed = summary.is_error && !summary.interrupted;
@@ -136,6 +150,24 @@ async fn turn(
         report(&summary);
     }
     Ok(summary)
+}
+
+async fn ask_user(request: &ApprovalRequest) -> bool {
+    eprintln!(
+        "\n{} {} {}",
+        "Permitir?".yellow().bold(),
+        request.tool.bold(),
+        summarize_input(&request.input).dimmed()
+    );
+    eprint!("[s]im / [N]ão › ");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    let read = BufReader::new(tokio::io::stdin()).read_line(&mut answer).await;
+    read.is_ok() && is_yes(&answer)
+}
+
+fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_lowercase().as_str(), "s" | "sim" | "y" | "yes")
 }
 
 /// Motivo da falha de um turno (não conta interrupção pelo usuário).
@@ -207,6 +239,12 @@ mod tests {
         assert_eq!(failure_reason(&interrupted), None);
         let silent = TurnSummary { is_error: true, ..Default::default() };
         assert_eq!(failure_reason(&silent).as_deref(), Some("o turno terminou com erro"));
+    }
+
+    #[test]
+    fn test_is_yes() {
+        assert!(is_yes("s\n") && is_yes(" SIM ") && is_yes("y"));
+        assert!(!is_yes("") && !is_yes("n") && !is_yes("talvez"));
     }
 
     #[test]

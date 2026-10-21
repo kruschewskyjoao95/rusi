@@ -61,7 +61,7 @@ async fn test_turn_streams_tools_and_persists_session_file() {
         .unwrap();
 
     let mut seen = Vec::new();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), |e| seen.push(e.clone()))
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), rusi::session::deny_all, |e| seen.push(e.clone()))
         .await
         .unwrap();
     session.close().await;
@@ -79,10 +79,10 @@ async fn test_abort_settles_the_turn() {
     let (_dir, driver, db, thread_id) = setup();
     let mut session = driver.start_session(SessionConfig::default()).await.unwrap();
     let cancel = tokio::time::sleep(Duration::from_millis(300));
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, |_| {}).await.unwrap();
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, rusi::session::deny_all, |_| {}).await.unwrap();
     assert!(summary.interrupted && summary.is_error);
 
-    let next = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), |_| {})
+    let next = run_turn(session.as_mut(), &db, &thread_id, "oi", std::future::pending(), rusi::session::deny_all, |_| {})
         .await
         .unwrap();
     assert_eq!(next.text, "ola mundo");

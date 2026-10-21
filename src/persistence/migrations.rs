@@ -46,4 +46,11 @@ pub(super) const MIGRATIONS: &[(&str, &str)] = &[
         "004_threads_provider_session",
         "ALTER TABLE threads ADD COLUMN provider_session_id TEXT;",
     ),
+    (
+        "005_threads_worktree",
+        "
+        ALTER TABLE threads ADD COLUMN worktree_path TEXT;
+        ALTER TABLE threads ADD COLUMN branch TEXT;
+        ",
+    ),
 ];

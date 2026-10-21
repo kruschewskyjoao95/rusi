@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{AgentMode, EffortLevel};
 use crate::rpc::{Incoming, RpcError, RpcPeer};
-use crate::session::{AgentEvent, AgentSession, SessionConfig, SessionError, TokenUsage};
+use crate::session::{AgentEvent, AgentSession, ApprovalRequest, PendingApprovals, SessionConfig, SessionError, TokenUsage};
 
 /// Política traduzida do modo do Rusi para o vocabulário do Codex.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +181,16 @@ pub(super) struct ServerReply {
     pub denied: Option<&'static str>,
 }
 
+/// Nome da ferramenta quando `method` é um pedido de aprovação que o usuário pode decidir.
+fn approval_tool(method: &str) -> Option<&'static str> {
+    match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => Some("command"),
+        "item/fileChange/requestApproval" | "applyPatchApproval" => Some("file_change"),
+        "item/permissions/requestApproval" => Some("permissions"),
+        _ => None,
+    }
+}
+
 pub(super) fn answer_server_request(method: &str, params: &Value, auto_accept: bool) -> ServerReply {
     let decision = |accepted: bool, denied_name: &'static str| ServerReply {
         result: Ok(json!({ "decision": if accepted { "accept" } else { "decline" } })),
@@ -218,6 +228,7 @@ pub struct CodexSession {
     turn_id: Arc<Mutex<Option<String>>>,
     events: mpsc::UnboundedReceiver<AgentEvent>,
     effort: EffortLevel,
+    approvals: PendingApprovals,
 }
 
 fn rpc_to_session(err: RpcError) -> SessionError {
@@ -285,7 +296,12 @@ impl CodexSession {
         });
 
         let turn_id = Arc::new(Mutex::new(None));
-        let auto_accept = policy_for(config).auto_accept;
+        let policy = policy_for(config);
+        let auto_accept = policy.auto_accept;
+        // Com política "never" o Codex nunca pergunta; fora dela, quem decide é o usuário.
+        let interactive = !auto_accept && policy.approval_policy != "never";
+        let approvals = PendingApprovals::default();
+        let task_approvals = approvals.clone();
         let task_peer = peer.clone();
         let task_turn = turn_id.clone();
         tokio::spawn(async move {
@@ -304,6 +320,23 @@ impl CodexSession {
                         }
                     }
                     Incoming::Request { id, method, params } => {
+                        if interactive && let Some(tool) = approval_tool(&method) {
+                            let key = id.to_string();
+                            let peer = task_peer.clone();
+                            let (method, reply_params) = (method.clone(), params.clone());
+                            task_approvals.register(key.clone(), move |approved| async move {
+                                let reply = answer_server_request(&method, &reply_params, approved);
+                                let _ = match reply.result {
+                                    Ok(result) => peer.respond(id, result).await,
+                                    Err((code, message)) => peer.respond_error(id, code, message).await,
+                                };
+                            });
+                            let request = ApprovalRequest { id: key, tool: tool.to_string(), input: params };
+                            if tx.send(AgentEvent::ApprovalRequested(request)).is_err() {
+                                return;
+                            }
+                            continue;
+                        }
                         let reply = answer_server_request(&method, &params, auto_accept);
                         if let Some(tool) = reply.denied {
                             translator.note_denied(tool);
@@ -323,7 +356,7 @@ impl CodexSession {
             }
         });
 
-        Ok(Self { peer, thread_id, turn_id, events, effort: config.effort })
+        Ok(Self { peer, thread_id, turn_id, events, effort: config.effort, approvals })
     }
 }
 
@@ -348,6 +381,10 @@ impl AgentSession for CodexSession {
 
     async fn next_event(&mut self) -> Option<AgentEvent> {
         self.events.recv().await
+    }
+
+    async fn respond_approval(&mut self, id: &str, approved: bool) -> Result<(), SessionError> {
+        self.approvals.resolve(id, approved).await
     }
 
     async fn interrupt(&mut self) -> Result<(), SessionError> {

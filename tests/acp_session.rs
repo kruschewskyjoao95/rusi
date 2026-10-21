@@ -89,7 +89,7 @@ async fn test_rejected_permission_in_accept_edits() {
     let mut session = driver.start_session(config(AgentMode::AcceptEdits)).await.unwrap();
 
     let mut seen = Vec::new();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), |e| seen.push(e.clone()))
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), rusi::session::deny_all, |e| seen.push(e.clone()))
         .await
         .unwrap();
     session.close().await;
@@ -108,7 +108,7 @@ async fn test_rejected_permission_in_accept_edits() {
 async fn test_auto_mode_allows_the_tool() {
     let (_dir, driver, db, thread_id) = setup();
     let mut session = driver.start_session(config(AgentMode::Auto)).await.unwrap();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), |_| {})
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), rusi::session::deny_all, |_| {})
         .await
         .unwrap();
     session.close().await;
@@ -121,10 +121,10 @@ async fn test_cancel_ends_the_turn_and_session_continues() {
     let (_dir, driver, db, thread_id) = setup();
     let mut session = driver.start_session(config(AgentMode::Auto)).await.unwrap();
     let cancel = tokio::time::sleep(Duration::from_millis(300));
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, |_| {}).await.unwrap();
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, rusi::session::deny_all, |_| {}).await.unwrap();
     assert!(summary.interrupted && summary.is_error);
 
-    let next = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), |_| {})
+    let next = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), rusi::session::deny_all, |_| {})
         .await
         .unwrap();
     assert_eq!(next.text, "feito: yes");
@@ -153,4 +153,29 @@ async fn test_logged_out_agent_reports_login_hint() {
 
     let err = driver.start_session(config(AgentMode::Auto)).await.err().expect("deveria falhar sem login");
     assert!(matches!(&err, SessionError::NotReady(m) if m.contains("grok login")), "got: {err}");
+}
+
+#[tokio::test]
+async fn test_user_can_approve_the_tool_in_accept_edits() {
+    let (_dir, driver, db, thread_id) = setup();
+    let mut session = driver.start_session(config(AgentMode::AcceptEdits)).await.unwrap();
+    let mut asked = Vec::new();
+    let summary = run_turn(
+        session.as_mut(),
+        &db,
+        &thread_id,
+        "liste",
+        std::future::pending(),
+        async |request: &rusi::session::ApprovalRequest| {
+            asked.push(request.tool.clone());
+            true
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+    session.close().await;
+    assert_eq!(asked, ["Run ls"]);
+    assert_eq!(summary.text, "feito: yes");
+    assert!(summary.denied_tools.is_empty());
 }

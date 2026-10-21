@@ -3,6 +3,8 @@
 
 mod acp_session;
 mod antigravity;
+pub mod antigravity_auth;
+pub mod antigravity_install;
 mod claude;
 mod claude_session;
 mod cursor;

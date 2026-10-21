@@ -73,11 +73,86 @@ pub enum Commands {
     /// Guardar segredos de provedores no keyring do sistema
     Secrets(SecretsArgs),
 
+    /// Worktrees Git por tarefa
+    Worktree(WorktreeArgs),
+
+    /// Status e diff do checkout atual
+    Git(GitArgs),
+
+    /// Mostrar os arquivos alterados em cada turno de uma sessão
+    Changes {
+        /// Id da sessão
+        thread: String,
+    },
+
+    /// Gerenciar instalação e login do Antigravity (Google)
+    Antigravity(AntigravityArgs),
+
     /// Exibir informações de instalação e autocomplete
     Install,
 
     /// Verificar versão e atualizações do Rusi
     Update,
+}
+
+#[derive(Args, Debug)]
+pub struct AntigravityArgs {
+    #[command(subcommand)]
+    pub command: AntigravityCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AntigravityCommands {
+    /// Instala/atualiza o `agy_acp_server` gerenciado (~/.local/share/rusi/installs/antigravity)
+    Install,
+    /// Realiza login OAuth Google via loopback 127.0.0.1 (state 5 min, iss Google)
+    Login,
+    /// Mostra status da instalação e do token
+    Status,
+    /// Remove o token de login (logout)
+    Logout,
+}
+
+#[derive(Args, Debug)]
+pub struct WorktreeArgs {
+    #[command(subcommand)]
+    pub command: WorktreeCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorktreeCommands {
+    /// Cria uma branch num worktree novo (`<projeto>-worktrees/<branch>`)
+    New {
+        branch: String,
+        /// Branch/commit de partida (padrão: HEAD)
+        #[arg(long)]
+        base: Option<String>,
+        /// Sessão que passa a trabalhar nesse worktree
+        #[arg(long)]
+        thread: Option<String>,
+    },
+    /// Lista os worktrees do projeto
+    List,
+    /// Remove um worktree (recusa se houver alterações não commitadas)
+    Rm { path: PathBuf },
+}
+
+#[derive(Args, Debug)]
+pub struct GitArgs {
+    #[command(subcommand)]
+    pub command: GitCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GitCommands {
+    /// Arquivos alterados
+    Status,
+    /// Diff unificado
+    Diff {
+        /// Compara o que está no índice com HEAD
+        #[arg(long)]
+        staged: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -208,9 +283,85 @@ pub fn handle_command(cmd: &Commands, config: &mut Config) -> Result<(), Box<dyn
         Commands::Providers => handle_providers_command(config),
         Commands::Threads(args) => handle_threads_command(&args.command)?,
         Commands::Secrets(args) => handle_secrets_command(&args.command)?,
+        Commands::Worktree(args) => block_on(handle_worktree_command(&args.command))?,
+        Commands::Git(args) => block_on(handle_git_command(&args.command))?,
+        Commands::Changes { thread } => handle_changes_command(thread)?,
         Commands::Config(cfg_args) => handle_config_command(cfg_args.command.as_ref(), config)?,
+        Commands::Antigravity(args) => handle_antigravity_command(&args.command)?,
         Commands::Install => handle_install_command(),
         Commands::Update => handle_update_command(),
+    }
+    Ok(())
+}
+
+fn handle_antigravity_command(cmd: &AntigravityCommands) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        AntigravityCommands::Install => handle_antigravity_install()?,
+        AntigravityCommands::Login => handle_antigravity_login()?,
+        AntigravityCommands::Status => handle_antigravity_status()?,
+        AntigravityCommands::Logout => handle_antigravity_logout()?,
+    }
+    Ok(())
+}
+
+fn handle_antigravity_install() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::provider::antigravity_install;
+    println!("{}", "Instalando Antigravity (agy_acp_server)...".cyan().bold());
+    let url = antigravity_install::download_url_for_current()?;
+    println!("  URL: {}", url.dimmed());
+    let dir = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(antigravity_install::install(None))
+    })?;
+    println!("{} Instalado em {}", "✔".green().bold(), dir.display().to_string().cyan());
+    if let Some(complete) = antigravity_install::read_complete(&dir) {
+        println!("  versão: {}  sha256: {}…", complete.version, &complete.release_id[..12]);
+    }
+    Ok(())
+}
+
+fn handle_antigravity_login() -> Result<(), Box<dyn std::error::Error>> {
+    // O fluxo antigo não completava: usava um redirect próprio, enquanto o `agy_acp_server`
+    // abre o navegador com o dele, e nunca enviava `authenticate`. Fica para depois.
+    Err("login do Antigravity ainda não é suportado pelo Rusi".into())
+}
+
+fn handle_antigravity_status() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::provider::{AntigravityDriver, ProviderDriver};
+    let driver = AntigravityDriver::new();
+    let snap = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(driver.snapshot())
+    });
+    println!("\n{}", "=== Antigravity Status ===".cyan().bold());
+    println!("  instalado: {}", if snap.installed { "sim".green() } else { "não".red() });
+    if let Some(v) = snap.version {
+        println!("  versão: {v}");
+    }
+    if let Some(b) = snap.binary {
+        println!("  binário: {}", b.display().to_string().dimmed());
+    }
+    println!("  auth: {:?}", snap.auth);
+    if let Some(m) = snap.message {
+        println!("  {}", m.yellow());
+    }
+    if let Some(dir) = crate::provider::antigravity_install::install_dir() {
+        if let Some(c) = crate::provider::antigravity_install::read_complete(&dir) {
+            println!("  release: {} ({} bytes, sha256 {}…)", c.version, c.bytes, &c.release_id[..12]);
+        }
+        println!("  dir: {}", dir.display().to_string().dimmed());
+    }
+    println!();
+    Ok(())
+}
+
+fn handle_antigravity_logout() -> Result<(), Box<dyn std::error::Error>> {
+    let token = dirs::data_dir()
+        .map(|d| d.join("rusi").join("profiles").join("antigravity").join("antigravity-acp").join("acp_token.json"))
+        .ok_or("sem data_dir")?;
+    if token.exists() {
+        std::fs::remove_file(&token)?;
+        println!("{} Token removido: {}", "✔".green().bold(), token.display().to_string().cyan());
+    } else {
+        println!("{} Nenhum token encontrado.", "ℹ".blue().bold());
     }
     Ok(())
 }
@@ -337,6 +488,69 @@ pub fn open_database() -> Result<crate::persistence::Database, Box<dyn std::erro
     let path = crate::persistence::Database::default_path()
         .ok_or("não foi possível determinar o diretório de dados do usuário")?;
     Ok(crate::persistence::Database::open(&path)?)
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+}
+
+async fn handle_worktree_command(cmd: &WorktreeCommands) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    match cmd {
+        WorktreeCommands::New { branch, base, thread } => {
+            let path = match thread {
+                Some(id) => {
+                    let db = open_database()?;
+                    db.attach_worktree(id, &cwd, branch).await?
+                }
+                None => crate::git::create_worktree(&cwd, branch, base.as_deref()).await?,
+            };
+            println!("{} {}", "✔".green().bold(), path.display().to_string().cyan());
+        }
+        WorktreeCommands::List => print!("{}", crate::git::worktree_list(&cwd).await?),
+        WorktreeCommands::Rm { path } => {
+            crate::git::remove_worktree(&cwd, path).await?;
+            println!("{} Worktree removido.", "✔".green().bold());
+        }
+    }
+    Ok(())
+}
+
+async fn handle_git_command(cmd: &GitCommands) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    match cmd {
+        GitCommands::Status => {
+            let files = crate::git::status(&cwd).await?;
+            if files.is_empty() {
+                println!("{} Árvore limpa.", "ℹ".blue().bold());
+            }
+            for f in files {
+                println!("{}{} {}", f.index, f.worktree, f.path);
+            }
+        }
+        GitCommands::Diff { staged } => print!("{}", crate::git::diff(&cwd, *staged).await?),
+    }
+    Ok(())
+}
+
+fn handle_changes_command(thread: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let db = open_database()?;
+    db.get_thread(thread)?;
+    let mut turn = 0;
+    for event in db.thread_events(thread, 0)? {
+        match event.kind.as_str() {
+            "user" => turn += 1,
+            "changes" => {
+                println!("{}", format!("Turno {turn}").bold());
+                for f in event.payload["files"].as_array().into_iter().flatten() {
+                    let n = |k: &str| f[k].as_u64().map_or("-".into(), |v| v.to_string());
+                    println!("  {} {} {}", format!("+{}", n("added")).green(), format!("-{}", n("deleted")).red(), f["path"].as_str().unwrap_or("?"));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn handle_threads_command(cmd: &ThreadsCommands) -> Result<(), Box<dyn std::error::Error>> {

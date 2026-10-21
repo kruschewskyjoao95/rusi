@@ -80,7 +80,7 @@ async fn test_session_uses_private_profile_and_default_mode() {
         .start_session(SessionConfig { mode: AgentMode::Auto, ..Default::default() })
         .await
         .unwrap();
-    let summary = run_turn(session.as_mut(), &db, &thread.id, "oi", std::future::pending(), |_| {})
+    let summary = run_turn(session.as_mut(), &db, &thread.id, "oi", std::future::pending(), rusi::session::deny_all, |_| {})
         .await
         .unwrap();
     session.close().await;

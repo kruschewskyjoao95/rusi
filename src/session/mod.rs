@@ -1,9 +1,12 @@
 //! Sessões com agentes externos. Cada provedor traduz o protocolo do seu CLI para
 //! `AgentEvent`, de modo que o resto do Rusi não depende de nenhum provedor específico.
 
+mod approvals;
 mod runner;
 
-pub use runner::{TurnSummary, run_turn};
+pub use approvals::PendingApprovals;
+
+pub use runner::{TurnSummary, deny_all, run_turn};
 
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -44,7 +47,7 @@ pub struct SessionConfig {
     pub resume: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -52,8 +55,18 @@ pub struct TokenUsage {
     pub cache_creation_tokens: u64,
 }
 
+/// Pedido de permissão do agente para usar uma ferramenta.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ApprovalRequest {
+    /// Id do pedido, devolvido em `AgentSession::respond_approval`.
+    pub id: String,
+    pub tool: String,
+    pub input: serde_json::Value,
+}
+
 /// Evento normalizado emitido por qualquer provedor.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// A sessão do provedor existe; guarde `session_id` para retomar depois.
     SessionStarted { session_id: String, model: Option<String> },
@@ -61,6 +74,8 @@ pub enum AgentEvent {
     ThinkingDelta(String),
     ToolUse { id: String, name: String, input: serde_json::Value },
     ToolResult { id: String, output: String, is_error: bool },
+    /// O agente aguarda uma resposta via `AgentSession::respond_approval`.
+    ApprovalRequested(ApprovalRequest),
     /// Fim do turno.
     TurnComplete {
         text: Option<String>,
@@ -84,9 +99,28 @@ pub trait AgentSession: Send {
     /// Próximo evento; `None` quando a sessão terminou.
     async fn next_event(&mut self) -> Option<AgentEvent>;
 
+    /// Responde a um `AgentEvent::ApprovalRequested`.
+    async fn respond_approval(&mut self, _id: &str, _approved: bool) -> Result<(), SessionError> {
+        Err(SessionError::NotReady("este provedor não suporta aprovações interativas".into()))
+    }
+
     /// Pede ao agente para parar o turno atual, mantendo a sessão aberta.
     async fn interrupt(&mut self) -> Result<(), SessionError>;
 
     /// Encerra o agente e todos os processos filhos dele.
     async fn close(&mut self);
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn test_events_serialize_with_type_and_data() {
+        let json = |e: AgentEvent| serde_json::to_value(e).unwrap();
+        assert_eq!(json(AgentEvent::TextDelta("oi".into())), serde_json::json!({"type": "text_delta", "data": "oi"}));
+        let ask = json(AgentEvent::ApprovalRequested(ApprovalRequest { id: "1".into(), tool: "Bash".into(), input: serde_json::json!({}) }));
+        assert_eq!(ask["type"], "approval_requested");
+        assert_eq!(ask["data"]["tool"], "Bash");
+    }
 }

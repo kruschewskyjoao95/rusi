@@ -77,7 +77,7 @@ async fn test_turn_with_denied_command_in_accept_edits() {
     let mut session = driver.start_session(config(AgentMode::AcceptEdits, false)).await.unwrap();
 
     let mut seen = Vec::new();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), |e| seen.push(e.clone()))
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), rusi::session::deny_all, |e| seen.push(e.clone()))
         .await
         .unwrap();
     session.close().await;
@@ -98,7 +98,7 @@ async fn test_turn_with_denied_command_in_accept_edits() {
 async fn test_auto_mode_accepts_the_command() {
     let (_dir, driver, db, thread_id) = setup();
     let mut session = driver.start_session(config(AgentMode::Auto, false)).await.unwrap();
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), |_| {})
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), rusi::session::deny_all, |_| {})
         .await
         .unwrap();
     session.close().await;
@@ -112,10 +112,10 @@ async fn test_interrupt_ends_turn_and_session_stays_usable() {
     let mut session = driver.start_session(config(AgentMode::Auto, false)).await.unwrap();
 
     let cancel = tokio::time::sleep(Duration::from_millis(300));
-    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, |_| {}).await.unwrap();
+    let summary = run_turn(session.as_mut(), &db, &thread_id, "slow", cancel, rusi::session::deny_all, |_| {}).await.unwrap();
     assert!(summary.interrupted && summary.is_error);
 
-    let next = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), |_| {})
+    let next = run_turn(session.as_mut(), &db, &thread_id, "liste", std::future::pending(), rusi::session::deny_all, |_| {})
         .await
         .unwrap();
     assert_eq!(next.text, "feito: accept");
@@ -145,4 +145,31 @@ async fn test_snapshot_reports_unauthenticated() {
     let snap = driver.snapshot().await;
     assert!(snap.installed);
     assert_eq!(snap.auth, rusi::provider::AuthState::Unauthenticated);
+}
+
+#[tokio::test]
+async fn test_user_can_approve_a_command_in_accept_edits() {
+    let (_dir, driver, db, thread_id) = setup();
+    let mut session = driver.start_session(config(AgentMode::AcceptEdits, false)).await.unwrap();
+
+    let mut asked = Vec::new();
+    let summary = run_turn(
+        session.as_mut(),
+        &db,
+        &thread_id,
+        "liste",
+        std::future::pending(),
+        async |request: &rusi::session::ApprovalRequest| {
+            asked.push(request.tool.clone());
+            true
+        },
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(asked, ["command"]);
+    assert_eq!(summary.text, "feito: accept");
+    assert!(summary.denied_tools.is_empty());
+    session.close().await;
 }

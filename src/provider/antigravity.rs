@@ -1,8 +1,8 @@
 //! Driver do Antigravity (Google): o `agy_acp_server` oficial, via ACP, com um perfil
 //! privado (`GEMINI_HOME`) onde ele guarda `antigravity-acp/acp_token.json`.
 //!
-//! Este módulo cobre detecção do binário, estado do login e sessões. O download do binário
-//! e o login OAuth (redirect loopback) pertencem à fase 4 do roadmap.
+//! Este módulo cobre detecção do binário, estado do login e sessões. Instalação
+//! gerenciada e login OAuth loopback implementados na fase 4.
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -17,8 +17,7 @@ use crate::session::{AgentSession, SessionConfig, SessionError};
 
 const PERSONAL_AUTH_METHOD: &str = "oauth-personal";
 const SIGN_IN_HINT: &str =
-    "Antigravity sem login: o login Google do Rusi ainda não foi implementado (fase 4); \
-     o Antigravity exige uma assinatura elegível na conta Google";
+    "Antigravity sem login: execute `rusi antigravity login` (requer assinatura elegível)";
 
 /// Nomes do executável do servidor ACP, na ordem de preferência.
 const EXECUTABLE_NAMES: &[&str] = &["agy_acp_server", "agy-acp-server"];
@@ -71,9 +70,16 @@ impl Default for AntigravityDriver {
 }
 
 /// Caminho do harness ao lado do executável; `None` se não existir.
+/// Aceita tanto `localharness_external` quanto `localharness_external.par/.exe`.
 pub fn harness_for(executable: &Path) -> Option<PathBuf> {
-    let harness = executable.parent()?.join(HARNESS_NAME);
-    harness.is_file().then_some(harness)
+    let dir = executable.parent()?;
+    for name in [HARNESS_NAME, "localharness_external.par", "localharness_external.exe"] {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Lê o `acp_token.json` só para saber se há login; o conteúdo nunca sai daqui.
@@ -144,9 +150,18 @@ impl ProviderDriver for AntigravityDriver {
             return ProviderSnapshot::unavailable(
                 self.id(),
                 self.display_name(),
-                "`agy_acp_server` não instalado (a instalação gerenciada entra na fase 4)",
+                "`agy_acp_server` não instalado — execute `rusi antigravity install`",
             );
         };
+        // tenta ler versão do binário e do registro de instalação
+        let version = super::cli_probe::probe_version(&binary).await.or_else(|| {
+            self.profile_dir()
+                .as_ref()
+                .and_then(|_| super::antigravity_install::read_complete(
+                    &super::antigravity_install::install_dir().unwrap_or_default(),
+                ))
+                .map(|c| c.version)
+        });
         let auth = match self.profile_dir().map(|d| token_path(&d)).map(std::fs::read_to_string) {
             Some(Ok(raw)) => parse_token_file(&raw),
             Some(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => AuthState::Unauthenticated,
@@ -161,7 +176,7 @@ impl ProviderDriver for AntigravityDriver {
             id: self.id().to_string(),
             display_name: self.display_name().to_string(),
             installed: true,
-            version: None,
+            version,
             binary: Some(binary),
             auth,
             message,
@@ -170,7 +185,7 @@ impl ProviderDriver for AntigravityDriver {
 
     async fn start_session(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>, SessionError> {
         let binary = self.find_binary().ok_or_else(|| {
-            SessionError::NotReady("`agy_acp_server` não instalado (a instalação gerenciada entra na fase 4)".into())
+            SessionError::NotReady("`agy_acp_server` não instalado — execute `rusi antigravity install`".into())
         })?;
         let harness = harness_for(&binary).ok_or_else(|| {
             SessionError::NotReady(format!("falta `{HARNESS_NAME}` ao lado de {}", binary.display()))
