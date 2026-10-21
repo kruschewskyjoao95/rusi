@@ -40,7 +40,7 @@ rusi (crate lib, raiz)      ← todo o núcleo, testável sem UI
    ├─ secrets/    keyring do SO
    ├─ rpc/        JSON-RPC sobre stdio de processo filho
    ├─ tools/      encerra o grupo de processos de um agente
-   ├─ git         status, diff, stage, commit, worktrees, mudanças por turno (argv)
+   ├─ git         status, diff, worktrees, mudanças por turno (argv)
    └─ session/approvals  PendingApprovals: pedido → resposta ao provedor
 ```
 
@@ -96,6 +96,6 @@ Mudar modo/modelo exige tarefa ociosa; o próximo turno reaplica a política mes
 
 `list_projects`, `add_project`, `list_sessions`, `create_session`, `configure_session`,
 `send_message`, `stop_session`, `respond_approval`, `get_messages`, `list_providers`,
-`list_provider_models`, `git_status`, `git_diff`, `create_worktree`, `worktree_status`,
+`list_provider_models`, `git_status`, `git_diff`, `create_worktree`,
 `remove_worktree`, `set_task_stage`. Erros rejeitam com `string`. Eventos: `agent-event`,
 `sessions-changed`. Cada comando novo ganha um mock de preview para testar a UI no navegador.

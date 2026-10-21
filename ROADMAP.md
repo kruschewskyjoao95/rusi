@@ -28,10 +28,11 @@ Ver `PROJECT.md` para arquitetura e princípios.
 
 ## Fase 2 — Git, worktrees e mudanças por turno (núcleo e CLI feitos)
 
-- [x] Módulo `git`: `status`, `diff`, `stage/unstage`, `commit`, `branches` — sempre argv, stdin nulo,
-      timeout de 30 s, saída limitada, sem `--force`.
-- [x] Worktrees: `create_worktree`, `worktree_status` (sujo / à frente), `remove_worktree` (sem `--force`),
-      `recreate_worktree`; pasta `<projeto>-worktrees/<branch>`, branch validada.
+- [x] Módulo `git`: `status`, `diff` — sempre argv, stdin nulo, timeout de 30 s, saída limitada, sem `--force`.
+      `stage`, `commit`, `branches`, `worktree_status` e `recreate_worktree` foram removidos por falta de uso;
+      voltam quando o inspetor precisar.
+- [x] Worktrees: `create_worktree`, `remove_worktree` (sem `--force`); pasta `<projeto>-worktrees/<branch>`,
+      branch validada.
 - [x] Migration 005 (`threads.worktree_path`, `branch`); `attach_worktree` também move o `cwd` da thread,
       então agente, fs e git resolvem o checkout da tarefa.
 - [x] Mudanças por turno via fotos de árvore com índice temporário (não toca índice nem refs do usuário);

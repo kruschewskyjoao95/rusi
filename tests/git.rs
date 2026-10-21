@@ -16,13 +16,17 @@ fn sh(cwd: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
+fn branch(cwd: &Path) -> String {
+    let out = Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).current_dir(cwd).output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
 /// Repositório em `<tmp>/proj` com um commit; devolve o tempdir para o worktree ficar ao lado.
 fn repo() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("proj");
     std::fs::create_dir(&path).unwrap();
     sh(&path, &["init", "-q", "-b", "main"]);
-    // Identidade local: `git::commit` não passa `-c user.*` e a máquina de CI pode não ter uma.
     sh(&path, &["config", "user.name", "t"]);
     sh(&path, &["config", "user.email", "t@t"]);
     sh(&path, &["config", "commit.gpgsign", "false"]);
@@ -33,7 +37,7 @@ fn repo() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[tokio::test]
-async fn test_status_diff_stage_commit() {
+async fn test_status_and_diff() {
     let (_dir, repo) = repo();
     std::fs::write(repo.join("a.txt"), "um\ndois\n").unwrap();
     std::fs::write(repo.join("b b.txt"), "novo\n").unwrap();
@@ -43,11 +47,8 @@ async fn test_status_diff_stage_commit() {
     assert!(files.iter().any(|f| f.path == "b b.txt" && f.worktree == '?'));
     assert!(git::diff(&repo, false).await.unwrap().contains("+dois"));
 
-    git::stage(&repo, &["a.txt".into()]).await.unwrap();
+    sh(&repo, &["add", "a.txt"]);
     assert!(git::diff(&repo, true).await.unwrap().contains("+dois"));
-    git::commit(&repo, "segundo").await.unwrap();
-    assert_eq!(git::status(&repo).await.unwrap().len(), 1);
-    assert_eq!(git::branches(&repo).await.unwrap(), ["main"]);
 }
 
 #[tokio::test]
@@ -61,16 +62,9 @@ async fn test_worktree_lifecycle_and_branch_validation() {
     let path = git::create_worktree(&repo, "feat/um", None).await.unwrap();
     assert_eq!(path, git::worktree_path(&repo, "feat/um"));
     assert!(path.ends_with("proj-worktrees/feat-um") && path.join("a.txt").exists());
-    assert_eq!(git::current_branch(&path).await.unwrap(), "feat/um");
+    assert_eq!(branch(&path), "feat/um");
 
-    let clean = git::worktree_status(&path, "main").await.unwrap();
-    assert_eq!((clean.dirty, clean.ahead), (false, 0));
-    std::fs::write(path.join("c.txt"), "x\n").unwrap();
-    sh(&path, &["add", "."]);
-    sh(&path, &["commit", "-q", "-m", "c"]);
     std::fs::write(path.join("d.txt"), "y\n").unwrap();
-    let busy = git::worktree_status(&path, "main").await.unwrap();
-    assert_eq!((busy.dirty, busy.ahead), (true, 1));
 
     // Sem --force: com arquivo não rastreado o git recusa e o diretório continua lá.
     assert!(git::remove_worktree(&repo, &path).await.is_err());
@@ -78,10 +72,6 @@ async fn test_worktree_lifecycle_and_branch_validation() {
     std::fs::remove_file(path.join("d.txt")).unwrap();
     git::remove_worktree(&repo, &path).await.unwrap();
     assert!(!path.exists());
-
-    // A branch sobrevive à remoção e o checkout pode ser recriado.
-    let again = git::recreate_worktree(&repo, "feat/um").await.unwrap();
-    assert!(again.join("c.txt").exists());
 }
 
 #[tokio::test]
@@ -111,7 +101,7 @@ async fn test_turn_changes_do_not_touch_index_or_refs() {
     std::fs::write(repo.join("staged.txt"), "s\n").unwrap();
     sh(&repo, &["add", "staged.txt"]);
     std::fs::write(repo.join(".gitignore"), "ignorado\n").unwrap();
-    let head = git::current_branch(&repo).await.unwrap();
+    let head = branch(&repo);
 
     git::track_changes(&db, &thread.id, Some(&repo), async {
         std::fs::write(repo.join("a.txt"), "um\ndois\n").unwrap();
@@ -137,7 +127,7 @@ async fn test_turn_changes_do_not_touch_index_or_refs() {
 
     let status = git::status(&repo).await.unwrap();
     assert!(status.iter().any(|f| f.path == "staged.txt" && f.index == 'A'), "índice do usuário intacto: {status:?}");
-    assert_eq!(git::current_branch(&repo).await.unwrap(), head);
+    assert_eq!(branch(&repo), head);
     // O índice temporário não fica para trás.
     let leftovers = std::fs::read_dir(repo.join(".git")).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("rusi-index")).count();
     assert_eq!(leftovers, 0);

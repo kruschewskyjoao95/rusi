@@ -14,8 +14,6 @@ use tokio::process::Command;
 use crate::persistence::{Database, DbError};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// Hooks de pre-commit (testes, lint) podem demorar bem mais que um comando normal.
-const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Arquivo não rastreado maior que isso fica fora do snapshot (não é lido nem gravado no repositório).
 const SNAPSHOT_FILE_CAP: u64 = 1024 * 1024;
 const OUT_CAP: usize = 2 * 1024 * 1024;
@@ -50,13 +48,6 @@ pub struct FileStatus {
     pub index: char,
     pub worktree: char,
     pub path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorktreeStatus {
-    pub dirty: bool,
-    /// Commits na branch da tarefa que ainda não estão na base.
-    pub ahead: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,31 +133,6 @@ pub async fn diff(cwd: &Path, staged: bool) -> Result<String, GitError> {
     git(cwd, if staged { &["diff", "--cached"] } else { &["diff"] }).await
 }
 
-pub async fn stage(cwd: &Path, paths: &[String]) -> Result<(), GitError> {
-    let mut args = vec!["add", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git(cwd, &args).await.map(drop)
-}
-
-pub async fn unstage(cwd: &Path, paths: &[String]) -> Result<(), GitError> {
-    let mut args = vec!["restore", "--staged", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git(cwd, &args).await.map(drop)
-}
-
-pub async fn commit(cwd: &Path, message: &str) -> Result<(), GitError> {
-    run(cwd, &["commit", "-m", message], &[], OUT_CAP, COMMIT_TIMEOUT).await.map(drop)
-}
-
-pub async fn branches(cwd: &Path) -> Result<Vec<String>, GitError> {
-    let out = git(cwd, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]).await?;
-    Ok(out.lines().map(str::to_string).collect())
-}
-
-pub async fn current_branch(cwd: &Path) -> Result<String, GitError> {
-    Ok(git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await?.trim().to_string())
-}
-
 // ---------- worktrees ----------
 
 async fn validate_branch(cwd: &Path, branch: &str) -> Result<(), GitError> {
@@ -202,26 +168,9 @@ pub async fn worktree_list(repo: &Path) -> Result<String, GitError> {
     git(repo, &["worktree", "list"]).await
 }
 
-/// Sujo (alterações não commitadas) e quantos commits à frente de `base`.
-pub async fn worktree_status(path: &Path, base: &str) -> Result<WorktreeStatus, GitError> {
-    let dirty = !status(path).await?.is_empty();
-    let range = format!("{base}..HEAD");
-    let ahead = git(path, &["rev-list", "--count", &range]).await?.trim().parse().unwrap_or(0);
-    Ok(WorktreeStatus { dirty, ahead })
-}
-
 /// Remove o worktree sem `--force`: com alterações não commitadas o git recusa.
 pub async fn remove_worktree(repo: &Path, path: &Path) -> Result<(), GitError> {
     git(repo, &["worktree", "remove", &path.to_string_lossy()]).await.map(drop)
-}
-
-/// Recria o checkout de uma branch existente cujo worktree sumiu do disco.
-pub async fn recreate_worktree(repo: &Path, branch: &str) -> Result<PathBuf, GitError> {
-    validate_branch(repo, branch).await?;
-    git(repo, &["worktree", "prune"]).await?;
-    let path = worktree_path(repo, branch);
-    git(repo, &["worktree", "add", &path.to_string_lossy(), branch]).await?;
-    Ok(path)
 }
 
 impl Database {
