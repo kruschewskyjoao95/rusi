@@ -2,8 +2,9 @@
 //! e faz o streaming dos turnos para a tela.
 
 use colored::Colorize;
-use std::io::{self, IsTerminal, Write};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::OnceLock;
+use tokio::sync::{Mutex, mpsc};
 
 use crate::cli::open_database;
 use crate::config::Config;
@@ -19,6 +20,25 @@ pub struct ChatOptions {
 }
 
 type BoxError = Box<dyn std::error::Error>;
+
+/// Próxima linha do stdin (`None` no fim). Uma única thread lê tudo: cancelar a espera (Ctrl-C)
+/// não deixa uma leitura órfã que engoliria a linha seguinte. Thread própria, e não a do tokio,
+/// para o runtime poder encerrar com a leitura ainda bloqueada.
+async fn next_line() -> Option<String> {
+    static STDIN: OnceLock<Mutex<mpsc::UnboundedReceiver<String>>> = OnceLock::new();
+    let rx = STDIN.get_or_init(|| {
+        let (tx, rx) = mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            for line in io::stdin().lock().lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Mutex::new(rx)
+    });
+    rx.lock().await.recv().await
+}
 
 pub async fn run(config: &Config, options: ChatOptions) -> Result<(), BoxError> {
     let db = open_database()?;
@@ -88,12 +108,11 @@ async fn drive(
     }
 
     eprintln!("{}", "Sessão interativa. Linha vazia ignora; /exit ou Ctrl-D sai.".dimmed());
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     loop {
         eprint!("{} ", "›".cyan().bold());
         let _ = io::stderr().flush();
         let line = tokio::select! {
-            line = lines.next_line() => line?,
+            line = next_line() => line,
             _ = tokio::signal::ctrl_c() => None,
         };
         let Some(line) = line else { break };
@@ -161,9 +180,7 @@ async fn ask_user(request: &ApprovalRequest) -> bool {
     );
     eprint!("[s]im / [N]ão › ");
     let _ = io::stderr().flush();
-    let mut answer = String::new();
-    let read = BufReader::new(tokio::io::stdin()).read_line(&mut answer).await;
-    read.is_ok() && is_yes(&answer)
+    next_line().await.is_some_and(|answer| is_yes(&answer))
 }
 
 fn is_yes(answer: &str) -> bool {
