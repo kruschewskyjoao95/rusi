@@ -246,6 +246,7 @@ fn main() {
     let db = rusi::cli::open_database().expect("não foi possível abrir o banco do Rusi");
     let state = Arc::new(AppState { db: Some(db), ..Default::default() });
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             list_providers,

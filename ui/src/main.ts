@@ -274,6 +274,10 @@ async function init() {
     await refreshSessions();
     await select(thread);
   });
+  $("pick-cwd").onclick = guard(async () => {
+    const dir = await api.pickFolder();
+    if (dir) ($("new-cwd") as HTMLInputElement).value = dir;
+  });
   $("composer").onsubmit = guard(async (ev) => {
     ev.preventDefault();
     await send();

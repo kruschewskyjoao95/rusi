@@ -15,7 +15,10 @@
       <header><strong>Rusi</strong><button id="theme" title="Alternar tema" aria-label="Alternar tema">◐</button></header>
       <form id="new-session">
         <select id="new-provider" aria-label="Provedor"></select>
-        <input id="new-cwd" placeholder="Pasta do projeto" aria-label="Pasta do projeto" />
+        <div class="row">
+          <input id="new-cwd" placeholder="Pasta do projeto" aria-label="Pasta do projeto" />
+          <button type="button" id="pick-cwd" title="Escolher pasta">Procurar</button>
+        </div>
         <button type="submit">Nova tarefa</button>
       </form>
       <nav id="sessions" aria-label="Tarefas"></nav>

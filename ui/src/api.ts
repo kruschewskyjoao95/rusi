@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { AgentEventPayload, ApprovalRequest, FileStatus, Provider, Thread, ThreadEvent, TurnFinished } from "./types.ts";
 
 /** Fora do Tauri (preview no navegador) a UI usa dados de mentira. */
@@ -16,6 +17,7 @@ export interface Api {
   sendMessage(threadId: string, prompt: string, mode: string): Promise<void>;
   stopSession(threadId: string): Promise<void>;
   respondApproval(threadId: string, id: string, approved: boolean): Promise<void>;
+  pickFolder(): Promise<string | null>;
   gitStatus(cwd: string): Promise<FileStatus[]>;
   gitDiff(cwd: string, staged: boolean): Promise<string>;
   onAgentEvent(fn: Listener<AgentEventPayload>): void;
@@ -32,6 +34,7 @@ const real: Api = {
   sendMessage: (threadId, prompt, mode) => invoke("send_message", { threadId, prompt, mode }),
   stopSession: (threadId) => invoke("stop_session", { threadId }),
   respondApproval: (threadId, id, approved) => invoke("respond_approval", { threadId, id, approved }),
+  pickFolder: async () => (await open({ directory: true, title: "Pasta do projeto" })) ?? null,
   gitStatus: (cwd) => invoke("git_status", { cwd }),
   gitDiff: (cwd, staged) => invoke("git_diff", { cwd, staged }),
   onAgentEvent: (fn) => void listen<AgentEventPayload>("agent-event", (e) => fn(e.payload)),
@@ -54,6 +57,7 @@ function createMock(): Api {
       { id: "claude", display_name: "Claude Code", installed: true, auth: { state: "authenticated", account: "demo" } },
       { id: "codex", display_name: "Codex", installed: false, auth: { state: "unavailable" } },
     ],
+    pickFolder: async () => window.prompt("Pasta do projeto"),
     listSessions: async () => [...threads],
     createSession: async (provider, cwd) => {
       const t: Thread = { id: crypto.randomUUID(), provider, model: null, title: null, cwd, pinned: false, worktree_path: null, branch: null, updated_at: Date.now() };

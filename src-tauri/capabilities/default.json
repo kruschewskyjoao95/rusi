@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Janela principal: comandos próprios e eventos.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }
